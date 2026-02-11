@@ -141,7 +141,7 @@ class BackendPyTorch(ComputeBackend):
             loss = loss_fn(*tensor_args)
 
             # PyTorch autograd.grad 只支持对实数标量求导；若 loss 为复数则对 loss.real 求导
-            if self.torch.is_complex(loss):
+            if self.is_complex(loss):
                 loss_for_grad = loss.real
             else:
                 loss_for_grad = loss
@@ -158,7 +158,7 @@ class BackendPyTorch(ComputeBackend):
             )
 
             # 返回值：loss 为复数时返回实部标量，便于日志/比较
-            out_loss = loss.real.detach() if self.torch.is_complex(loss) else loss.detach()
+            out_loss = loss.real.detach() if self.is_complex(loss) else loss.detach()
             if out_loss.ndim > 0:
                 out_loss = out_loss.sum()
             return out_loss, gradients
@@ -371,7 +371,7 @@ class BackendPyTorch(ComputeBackend):
                 grad_2d = grad
 
             # Detect complex for Stiefel step (conjugate and skew-Hermitian)
-            is_complex = self.torch.is_complex(param_2d)
+            is_complex = self.is_complex(param_2d)
             
             # Normalize to get orthogonal matrix
             unity, unity_norm = self._unit(param_2d)
@@ -443,7 +443,7 @@ class BackendPyTorch(ComputeBackend):
         tan_vec_T = tan_vec.T
         q, r = self.torch.linalg.qr(tan_vec_T, mode='reduced')
         d = self.torch.diag(r)
-        if self.torch.is_complex(d):
+        if self.is_complex(d):
             ph = self.torch.sgn(d)
         else:
             ph = self.torch.sign(d)
@@ -473,13 +473,13 @@ class BackendPyTorch(ComputeBackend):
         
         random_matrix = self.torch.randn(
             (flat_dim, flat_dim),
-            device=self.backend_info.device,
+            device=self.backend_info.device,    
             # dtype=self.default_dtype if not self.torch.is_complex(self.torch.zeros(1, dtype=self.default_dtype)) else self.torch.float32,
             dtype=self.default_dtype,
         )
         Q, R = self.torch.linalg.qr(random_matrix)
         d = self.torch.diag(R)
-        if self.torch.is_complex(d):
+        if self.is_complex(d):
             phases = d / (d.abs() + 1e-12)
             sign_correction = self.torch.diag(phases.conj())
             # sign_correction = phases.conj()
@@ -490,7 +490,7 @@ class BackendPyTorch(ComputeBackend):
         
 
         # 如果默认 dtype 是复数，则将实数正交矩阵提升到复数 dtype
-        if self.torch.is_complex(self.torch.zeros(1, dtype=self.default_dtype)):
+        if self.is_complex(self.torch.zeros(1, dtype=self.default_dtype)):
             Q = Q.to(self.default_dtype)
         return self.wrap_tensor(Q.reshape(shape))
 
@@ -551,7 +551,7 @@ class BackendPyTorch(ComputeBackend):
         PyTorch 不支持对 complex 张量直接 clamp，这里只对实部做裁剪，
         虚部保持不变，满足本项目中“概率/密度在实部非负”的需求。
         """
-        if self.torch.is_complex(tensor):
+        if self.is_complex(tensor):
             real = self.torch.real(tensor)
             imag = self.torch.imag(tensor)
             real_clamped = self.torch.clamp(real, min=min, max=max)
@@ -650,11 +650,13 @@ class BackendPyTorch(ComputeBackend):
 
     def is_complex(self, tensor) -> bool:
         """Return True if tensor is complex dtype."""
+        if self.use_tn_tensor:
+            return self.torch.is_complex(tensor.tensor)
         return self.torch.is_complex(tensor)
 
     def abs_square(self, tensor):
         """Born rule: for complex return |tensor|^2 (real); for real return as-is."""
-        if self.torch.is_complex(tensor):
+        if self.is_complex(tensor):
             r, i = self.torch.real(tensor), self.torch.imag(tensor)
             return r * r + i * i
         return tensor

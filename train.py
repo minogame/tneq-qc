@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 from tneq_qc.backends.backend_factory import BackendFactory
 from tneq_qc.config import Configuration
-from tneq_qc.core.cqctn import ContractorQCTN
+# from tneq_qc.core.cqctn import ContractorQCTN
 from tneq_qc.backends.copteinsum import ContractorOptEinsum
 from tneq_qc.core.engine_siamese import EngineSiamese
 from tneq_qc.core.qctn import QCTN, QCTNHelper
@@ -267,7 +267,7 @@ if __name__ == "__main__":
     x_test = x_all[num_train_points:]
     if x_test.numel() == 0:
         x_test = x_all
-
+    
     # for i in range(len(data_list_for_optim)):
     #     x = data_list_for_optim[i]["measure_input_list"]
     #     data_list_for_optim[i]["measure_input_list"] = [torch.eye(tensor.shape[-1], device=tensor.device) for tensor in x]

@@ -42,6 +42,8 @@ class GreedyStrategy(ContractionStrategy):
         """
         Return computation function for greedy contraction.
         """
+        self.backend = backend
+
         def compute_fn(_cores_dict, circuit_states, measure_matrices, right_cores_dict=None):
             """
             Greedy contraction strategy with symmetric expansion.
@@ -521,7 +523,7 @@ class GreedyStrategy(ContractionStrategy):
                 entries_on_qubit.extend(additional_entries)
 
                 # Find connected groups
-                groups = _find_connected_groups_symmetric(entries_on_qubit, qubit_idx)
+                groups = self._find_connected_groups_symmetric(entries_on_qubit, qubit_idx)
                 
                 # if len(groups) > 1:
                 #     raise NotImplementedError(
@@ -540,7 +542,7 @@ class GreedyStrategy(ContractionStrategy):
                     # if len(group) == 1:
                     #     continue
 
-                    new_entry = _contract_symmetric_group(
+                    new_entry = self._contract_symmetric_group(
                         group, qubit_idx, backend, nqubits,
                         cores_dict, circuit_states, measure_matrices
                     )
@@ -589,12 +591,12 @@ class GreedyStrategy(ContractionStrategy):
             # ========================================
             # print(f"Final core_tensor_list length: {len(core_tensor_list)}")
             if len(core_tensor_list) == 1:
-                return _get_tensor(core_tensor_list[0], cores_dict, circuit_states, measure_matrices)
+                return self._get_tensor(core_tensor_list[0], cores_dict, circuit_states, measure_matrices)
             elif len(core_tensor_list) == 0:
                 raise RuntimeError("No tensor left after contraction")
             else:
                 # Contract remaining tensors
-                result = _contract_remaining(core_tensor_list, backend, cores_dict, circuit_states, measure_matrices)
+                result = self._contract_remaining(core_tensor_list, backend, cores_dict, circuit_states, measure_matrices)
                 return result
         
         return compute_fn
@@ -612,469 +614,470 @@ class GreedyStrategy(ContractionStrategy):
         return "greedy"
 
 
-def _find_connected_groups_symmetric(entries_on_qubit: List[Dict], qubit_idx: int) -> List[List[Dict]]:
-    """
-    Find connected components among entries on a given qubit.
-    
-    Two entries are connected if they share an edge (neighbor relationship).
-    """
-    if not entries_on_qubit:
-        return []
-    
-    n = len(entries_on_qubit)
-    if n == 1:
-        return [entries_on_qubit]
-    
-    # Build index mapping
-    core_indices = [entry['core_idx'] for entry in entries_on_qubit]
-    idx_to_pos = {idx: pos for pos, idx in enumerate(core_indices)}
-    
-    # Union-Find
-    parent = list(range(n))
-    
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-    
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-    
-    # Check connectivity via edges
-    for i, entry in enumerate(entries_on_qubit):
-        for edge in entry['out_edge_list']:
-            neighbor_idx = edge['neighbor_idx']
-            if neighbor_idx >= 0 and neighbor_idx in idx_to_pos:
-                union(i, idx_to_pos[neighbor_idx])
-        for edge in entry['in_edge_list']:
-            neighbor_idx = edge['neighbor_idx']
-            if neighbor_idx >= 0 and neighbor_idx in idx_to_pos:
-                union(i, idx_to_pos[neighbor_idx])
-    
-    # Group by root
-    groups_dict = {}
-    for i in range(n):
-        root = find(i)
-        if root not in groups_dict:
-            groups_dict[root] = []
-        groups_dict[root].append(entries_on_qubit[i])
-    
-    return list(groups_dict.values())
-
-
-def _get_tensor(entry: Dict, cores_dict, circuit_states, measure_matrices):
-    """Helper to retrieve tensor from source info."""
-    if 'tensor' in entry:
-        return entry['tensor']
-    
-    source = entry['tensor_source']
-    key = entry['tensor_key']
-    
-    if source == 'core':
-        return cores_dict[key]
-    elif source == 'transpose':
-        if cores_dict[key].is_complex():
-            return cores_dict[key].conj()
-        else:
-            return cores_dict[key]
-    elif source == 'circuit':
-        return circuit_states[key]
-    elif source == 'mx':
-        return measure_matrices[key]
-    else:
-        raise ValueError(f"Unknown tensor source: {source}")
-
-
-def _contract_symmetric_group(
-    group: List[Dict], 
-    qubit_idx: int, 
-    backend,
-    nqubits: int,
-    cores_dict,
-    circuit_states,
-    measure_matrices
-) -> Optional[Dict]:
-    """
-    Contract all entries in a group, eliminating edges on the current qubit.
-    
-    This handles the symmetric structure: Left cores, Mx, Right cores, circuit states.
-    
-    Key: For RIGHT version tensors, the edge index order is reversed relative to tensor dims.
-    When building einsum, we need to handle this reversal.
-    
-    Args:
-        group: List of entries to contract
-        qubit_idx: Current qubit index being processed
-        backend: Computation backend
-        nqubits: Total number of qubits
-    
-    Returns:
-        New entry with contracted tensor and updated edges
-    """
-    import torch
-    import opt_einsum
-    
-    if len(group) == 1:
-        entry = group[0]
-        # Check if this single entry has any edges on current qubit that need removal
-        has_qubit_edge = False
-        for edge in entry['in_edge_list'] + entry['out_edge_list']:
-            if edge['qubit_idx'] == qubit_idx:
-                has_qubit_edge = True
-                break
-        if not has_qubit_edge:
-            return entry
-    
-    # print(f"\n  _contract_symmetric_group at qubit {qubit_idx}")
-    # print(f"  Group members: {[e['core_name'] for e in group]}")
-    
-    # ========================================
-    # Build einsum expression
-    # ========================================
-    tensor_list = []
-    einsum_parts = []
-    
-    # Group core indices
-    group_indices = set(entry['core_idx'] for entry in group)
-    
-    # Collect output edges and symbols
-    collected_in_edges = []   # List of (symbol, edge)
-    collected_out_edges = []  # List of (symbol, edge)
-    batch_symbols = set()
-    
-    for entry in group:
+    def _find_connected_groups_symmetric(self, entries_on_qubit: List[Dict], qubit_idx: int) -> List[List[Dict]]:
+        """
+        Find connected components among entries on a given qubit.
         
-        # print(f"Processing entry: {entry['core_name']}")
-
-        core_idx = entry['core_idx']
-        tensor = _get_tensor(entry, cores_dict, circuit_states, measure_matrices)
-        side = entry['side']
+        Two entries are connected if they share an edge (neighbor relationship).
+        """
+        if not entries_on_qubit:
+            return []
         
-        tensor_list.append(tensor)
+        n = len(entries_on_qubit)
+        if n == 1:
+            return [entries_on_qubit]
         
-        # Handle batch symbols
-        batch_sym = entry.get('batch_symbol', '')
-        for char in batch_sym:
-            batch_symbols.add(char)
+        # Build index mapping
+        core_indices = [entry['core_idx'] for entry in entries_on_qubit]
+        idx_to_pos = {idx: pos for pos, idx in enumerate(core_indices)}
         
-        part = batch_sym
+        # Union-Find
+        parent = list(range(n))
         
-        if side == TensorSide.RIGHT:
-            # RIGHT version: tensor dims are [original_in..., original_out...]
-            # But edge lists are reversed: in_edge_list is reversed(original_out_edge_list)
-            #                              out_edge_list is reversed(original_in_edge_list)
-            
-            original_in_count = entry.get('original_in_edge_count', len(entry['out_edge_list']))
-            original_out_count = entry.get('original_out_edge_count', len(entry['in_edge_list']))
-            
-            # Build symbols in tensor dimension order (original_in first, then original_out)
-            # Note: batch_sym is already added to part, so we only need to handle non-batch dims
-            dim_symbols = [None] * (tensor.ndim - len(batch_sym))
-            
-            # out_edge_list (was original in_edges, reversed)
-            # out_edge_list[i] <-> tensor dim (original_in_count - 1 - i)
-            for edge_list_idx, edge in enumerate(entry['out_edge_list']):
-                
-                # print(f"  RIGHT out_edge_list idx {edge_list_idx}, edge: {edge}")
-                
-                symbol = edge['symbol']
-                tensor_dim = original_in_count - 1 - edge_list_idx
-                dim_symbols[tensor_dim] = symbol
-                
-                # Check if edge should be kept
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                
-                # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
-                empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
-                
-                # print(f"out edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
-
-                if empty_edge or not is_internal and not is_on_current_qubit:
-                    collected_out_edges.append((symbol, edge.copy()))
-            
-            # in_edge_list (was original out_edges, reversed)
-            # in_edge_list[i] <-> tensor dim (original_in_count + original_out_count - 1 - i)
-            for edge_list_idx, edge in enumerate(entry['in_edge_list']):
-
-                # print(f"  RIGHT in_edge_list idx {edge_list_idx}, edge: {edge}")
-
-                symbol = edge['symbol']
-                tensor_dim = original_in_count + original_out_count - 1 - edge_list_idx
-                dim_symbols[tensor_dim] = symbol
-                
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                
-                # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
-                empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
-
-                # print(f"in edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
-                
-                if empty_edge or not is_internal and not is_on_current_qubit:
-                    collected_in_edges.append((symbol, edge.copy()))
-            
-            part += "".join(s for s in dim_symbols if s is not None)
-            einsum_parts.append(part)
-            
-        else:
-            # LEFT version, MIDDLE (Mx), Merged, or circuit states
-            # Standard order: batch + in_edges + out_edges
-            
-            # In edges
-            for edge in entry['in_edge_list']:
-                symbol = edge['symbol']
-                part += symbol
-                
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-
-                # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
-                empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
-                
-                # print(f"in edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
-
-                if empty_edge or not is_internal and not is_on_current_qubit:
-                    collected_in_edges.append((symbol, edge.copy()))
-            
-            # Out edges
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+        
+        # Check connectivity via edges
+        for i, entry in enumerate(entries_on_qubit):
             for edge in entry['out_edge_list']:
-                symbol = edge['symbol']
-                part += symbol
-                
                 neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                if neighbor_idx >= 0 and neighbor_idx in idx_to_pos:
+                    union(i, idx_to_pos[neighbor_idx])
+            for edge in entry['in_edge_list']:
+                neighbor_idx = edge['neighbor_idx']
+                if neighbor_idx >= 0 and neighbor_idx in idx_to_pos:
+                    union(i, idx_to_pos[neighbor_idx])
+        
+        # Group by root
+        groups_dict = {}
+        for i in range(n):
+            root = find(i)
+            if root not in groups_dict:
+                groups_dict[root] = []
+            groups_dict[root].append(entries_on_qubit[i])
+        
+        return list(groups_dict.values())
 
-                # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
-                empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
-                
-                # print(f"out edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
 
-                if empty_edge or not is_internal and not is_on_current_qubit:
-                    collected_out_edges.append((symbol, edge.copy()))
-            
-            einsum_parts.append(part)
-    
-    # Construct output_symbols in specific order: a, b, in_edges, out_edges
-    output_symbols = []
-    new_batch_symbol = ""
-    if 'a' in batch_symbols:
-        output_symbols.append('a')
-        new_batch_symbol += 'a'
-    if 'b' in batch_symbols:
-        output_symbols.append('b')
-        new_batch_symbol += 'b'
+    def _get_tensor(self, entry: Dict, cores_dict, circuit_states, measure_matrices):
+        """Helper to retrieve tensor from source info."""
+        if 'tensor' in entry:
+            return entry['tensor']
+        
+        source = entry['tensor_source']
+        key = entry['tensor_key']
+        
+        if source == 'core':
+            return cores_dict[key]
+        elif source == 'transpose':
+            if self.backend.is_complex(cores_dict[key]):
+                return cores_dict[key].conj()
+            else:
+                return cores_dict[key]
+        elif source == 'circuit':
+            return circuit_states[key]
+        elif source == 'mx':
+            return measure_matrices[key]
+        else:
+            raise ValueError(f"Unknown tensor source: {source}")
 
-    # print(f'collected_in_edges : {collected_in_edges}')
-    # print(f'collected_out_edges : {collected_out_edges}')
 
-    for sym, _ in collected_in_edges:
-        output_symbols.append(sym)
-    for sym, _ in collected_out_edges:
-        output_symbols.append(sym)
-    
-    # Build einsum equation
-    einsum_eq = ",".join(einsum_parts) + "->" + "".join(output_symbols)
-    
-    # mapping symbol to standard einsum symbols
-    def remap_symbols(einsum_eq: str) -> str:
+    def _contract_symmetric_group(
+        self,
+        group: List[Dict], 
+        qubit_idx: int, 
+        backend,
+        nqubits: int,
+        cores_dict,
+        circuit_states,
+        measure_matrices
+    ) -> Optional[Dict]:
+        """
+        Contract all entries in a group, eliminating edges on the current qubit.
+        
+        This handles the symmetric structure: Left cores, Mx, Right cores, circuit states.
+        
+        Key: For RIGHT version tensors, the edge index order is reversed relative to tensor dims.
+        When building einsum, we need to handle this reversal.
+        
+        Args:
+            group: List of entries to contract
+            qubit_idx: Current qubit index being processed
+            backend: Computation backend
+            nqubits: Total number of qubits
+        
+        Returns:
+            New entry with contracted tensor and updated edges
+        """
+        import torch
         import opt_einsum
-        symbol_map = {
-            'a': 'a',
-            'b': 'b',
-            ',': ',',
-            '-': '-',
-            '>': '>',
+        
+        if len(group) == 1:
+            entry = group[0]
+            # Check if this single entry has any edges on current qubit that need removal
+            has_qubit_edge = False
+            for edge in entry['in_edge_list'] + entry['out_edge_list']:
+                if edge['qubit_idx'] == qubit_idx:
+                    has_qubit_edge = True
+                    break
+            if not has_qubit_edge:
+                return entry
+        
+        # print(f"\n  _contract_symmetric_group at qubit {qubit_idx}")
+        # print(f"  Group members: {[e['core_name'] for e in group]}")
+        
+        # ========================================
+        # Build einsum expression
+        # ========================================
+        tensor_list = []
+        einsum_parts = []
+        
+        # Group core indices
+        group_indices = set(entry['core_idx'] for entry in group)
+        
+        # Collect output edges and symbols
+        collected_in_edges = []   # List of (symbol, edge)
+        collected_out_edges = []  # List of (symbol, edge)
+        batch_symbols = set()
+        
+        for entry in group:
+            
+            # print(f"Processing entry: {entry['core_name']}")
+
+            core_idx = entry['core_idx']
+            tensor = self._get_tensor(entry, cores_dict, circuit_states, measure_matrices)
+            side = entry['side']
+            
+            tensor_list.append(tensor)
+            
+            # Handle batch symbols
+            batch_sym = entry.get('batch_symbol', '')
+            for char in batch_sym:
+                batch_symbols.add(char)
+            
+            part = batch_sym
+            
+            if side == TensorSide.RIGHT:
+                # RIGHT version: tensor dims are [original_in..., original_out...]
+                # But edge lists are reversed: in_edge_list is reversed(original_out_edge_list)
+                #                              out_edge_list is reversed(original_in_edge_list)
+                
+                original_in_count = entry.get('original_in_edge_count', len(entry['out_edge_list']))
+                original_out_count = entry.get('original_out_edge_count', len(entry['in_edge_list']))
+                
+                # Build symbols in tensor dimension order (original_in first, then original_out)
+                # Note: batch_sym is already added to part, so we only need to handle non-batch dims
+                dim_symbols = [None] * (tensor.ndim - len(batch_sym))
+                
+                # out_edge_list (was original in_edges, reversed)
+                # out_edge_list[i] <-> tensor dim (original_in_count - 1 - i)
+                for edge_list_idx, edge in enumerate(entry['out_edge_list']):
+                    
+                    # print(f"  RIGHT out_edge_list idx {edge_list_idx}, edge: {edge}")
+                    
+                    symbol = edge['symbol']
+                    tensor_dim = original_in_count - 1 - edge_list_idx
+                    dim_symbols[tensor_dim] = symbol
+                    
+                    # Check if edge should be kept
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    
+                    # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
+                    empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
+                    
+                    # print(f"out edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
+
+                    if empty_edge or not is_internal and not is_on_current_qubit:
+                        collected_out_edges.append((symbol, edge.copy()))
+                
+                # in_edge_list (was original out_edges, reversed)
+                # in_edge_list[i] <-> tensor dim (original_in_count + original_out_count - 1 - i)
+                for edge_list_idx, edge in enumerate(entry['in_edge_list']):
+
+                    # print(f"  RIGHT in_edge_list idx {edge_list_idx}, edge: {edge}")
+
+                    symbol = edge['symbol']
+                    tensor_dim = original_in_count + original_out_count - 1 - edge_list_idx
+                    dim_symbols[tensor_dim] = symbol
+                    
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    
+                    # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
+                    empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
+
+                    # print(f"in edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
+                    
+                    if empty_edge or not is_internal and not is_on_current_qubit:
+                        collected_in_edges.append((symbol, edge.copy()))
+                
+                part += "".join(s for s in dim_symbols if s is not None)
+                einsum_parts.append(part)
+                
+            else:
+                # LEFT version, MIDDLE (Mx), Merged, or circuit states
+                # Standard order: batch + in_edges + out_edges
+                
+                # In edges
+                for edge in entry['in_edge_list']:
+                    symbol = edge['symbol']
+                    part += symbol
+                    
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+
+                    # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
+                    empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
+                    
+                    # print(f"in edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
+
+                    if empty_edge or not is_internal and not is_on_current_qubit:
+                        collected_in_edges.append((symbol, edge.copy()))
+                
+                # Out edges
+                for edge in entry['out_edge_list']:
+                    symbol = edge['symbol']
+                    part += symbol
+                    
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+
+                    # empty_edge = edge['neighbor_idx'] == -1 and edge['neighbor_name'] == ""
+                    empty_edge = edge['neighbor_idx'] == -1 # and edge['neighbor_name'] == ""
+                    
+                    # print(f"out edge {edge} empty_edge: {empty_edge}, is_internal: {is_internal}, is_on_current_qubit: {is_on_current_qubit}")
+
+                    if empty_edge or not is_internal and not is_on_current_qubit:
+                        collected_out_edges.append((symbol, edge.copy()))
+                
+                einsum_parts.append(part)
+        
+        # Construct output_symbols in specific order: a, b, in_edges, out_edges
+        output_symbols = []
+        new_batch_symbol = ""
+        if 'a' in batch_symbols:
+            output_symbols.append('a')
+            new_batch_symbol += 'a'
+        if 'b' in batch_symbols:
+            output_symbols.append('b')
+            new_batch_symbol += 'b'
+
+        # print(f'collected_in_edges : {collected_in_edges}')
+        # print(f'collected_out_edges : {collected_out_edges}')
+
+        for sym, _ in collected_in_edges:
+            output_symbols.append(sym)
+        for sym, _ in collected_out_edges:
+            output_symbols.append(sym)
+        
+        # Build einsum equation
+        einsum_eq = ",".join(einsum_parts) + "->" + "".join(output_symbols)
+        
+        # mapping symbol to standard einsum symbols
+        def remap_symbols(einsum_eq: str) -> str:
+            import opt_einsum
+            symbol_map = {
+                'a': 'a',
+                'b': 'b',
+                ',': ',',
+                '-': '-',
+                '>': '>',
+            }
+
+            idx = 2
+            for i, c in enumerate(einsum_eq):
+                if c not in symbol_map:
+                    symbol_map[c] = opt_einsum.get_symbol(idx)
+                    idx += 1
+            remapped = "".join(symbol_map.get(c, c) for c in einsum_eq)
+            return remapped
+
+        einsum_eq = remap_symbols(einsum_eq)
+
+        # print(f"  Einsum equation: {einsum_eq}")
+        # print(f"  Tensor shapes: {[t.shape for t in tensor_list]}")
+        
+        # Execute contraction
+        # result_tensor = torch.einsum(einsum_eq, *tensor_list)
+        
+        # Check for TNTensors and prepare inputs for einsum
+        raw_tensor_list = []
+        total_scale = None
+        total_log_scale = None
+        has_tntensor = False
+
+        for t in tensor_list:
+            if isinstance(t, TNTensor):
+                has_tntensor = True
+                raw_tensor_list.append(t.tensor)
+                if total_scale is None:
+                    # total_scale = 1.0 * t.scale
+                    total_scale = t.scale #.detach().clone()
+                else:
+                    total_scale *= t.scale #.detach().clone()
+                
+                if total_log_scale is None:
+                    total_log_scale = t.log_scale
+                else:
+                    total_log_scale += t.log_scale
+            else:
+                raw_tensor_list.append(t)
+        
+        # Execute contraction
+        if has_tntensor:
+            # print("  Using TNTensor contraction with scale handling.")
+            # print(f"  einsum eq: {einsum_eq} raw_tensor_list shapes: {[t.shape for t in raw_tensor_list]}")
+            # Use raw tensors for contraction
+            raw_result = torch.einsum(einsum_eq, *raw_tensor_list)
+        
+            # import numpy as np
+            # raw_result = raw_result.contiguous()
+            # tmp = raw_result.abs().max().detach().item()
+            # raw_result /= tmp
+            # total_scale *= tmp
+            # total_log_scale += np.log(tmp)
+
+            # result_tensor = TNTensor(raw_result / tmp, scale=total_scale * tmp, log_scale=total_log_scale + np.log(tmp))
+
+            # Create result TNTensor
+            result_tensor = TNTensor(raw_result, scale=total_scale, log_scale=total_log_scale)
+            # result_tensor = TNTensor(raw_result, scale=total_scale)
+
+            # tmp = result_tensor.tensor.abs().max()
+            
+            # result_tensor.auto_scale()
+        else:
+            result_tensor = torch.einsum(einsum_eq, *tensor_list)
+
+            # print(f"torch einsum einsum_eq: {einsum_eq}")
+            # for tt in tensor_list:
+            #     print(f"tt: {tt.shape} {tt}")
+            # print(f"result_tensor: {result_tensor.shape} {result_tensor}")
+
+        # print(f"  Result shape: {result_tensor.shape}")
+        
+        # Build remaining edges
+        remaining_in_edges = [edge for _, edge in collected_in_edges]
+        remaining_out_edges = [edge for _, edge in collected_out_edges]
+        
+        # Create new entry
+        new_core_idx = -1 - qubit_idx
+        
+        new_entry = {
+            'core_idx': new_core_idx,
+            'core_name': f"merged_{qubit_idx}",
+            'tensor': result_tensor,
+            'tensor_source': 'merged',
+            'tensor_key': None,
+            'in_edge_list': remaining_in_edges,
+            'out_edge_list': remaining_out_edges,
+            'side': TensorSide.MIDDLE,  # Merged is considered middle
+            'batch_symbol': new_batch_symbol,
         }
 
-        idx = 2
-        for i, c in enumerate(einsum_eq):
-            if c not in symbol_map:
-                symbol_map[c] = opt_einsum.get_symbol(idx)
-                idx += 1
-        remapped = "".join(symbol_map.get(c, c) for c in einsum_eq)
-        return remapped
+        # print(f"  Created new merged entry: {new_entry['core_name']} with shape {result_tensor.shape}")
+        # print(f"new_entry :\n{new_entry}")
+        
+        return new_entry
 
-    einsum_eq = remap_symbols(einsum_eq)
 
-    # print(f"  Einsum equation: {einsum_eq}")
-    # print(f"  Tensor shapes: {[t.shape for t in tensor_list]}")
-    
-    # Execute contraction
-    # result_tensor = torch.einsum(einsum_eq, *tensor_list)
-    
-    # Check for TNTensors and prepare inputs for einsum
-    raw_tensor_list = []
-    total_scale = None
-    total_log_scale = None
-    has_tntensor = False
-
-    for t in tensor_list:
-        if isinstance(t, TNTensor):
-            has_tntensor = True
-            raw_tensor_list.append(t.tensor)
-            if total_scale is None:
-                # total_scale = 1.0 * t.scale
-                total_scale = t.scale #.detach().clone()
-            else:
-                total_scale *= t.scale #.detach().clone()
+    def _contract_remaining(self, core_tensor_list: List[Dict], backend, cores_dict, circuit_states, measure_matrices) -> Any:
+        """
+        Contract any remaining tensors into final result.
+        """
+        import torch
+        import opt_einsum
+        
+        if len(core_tensor_list) == 0:
+            raise RuntimeError("No tensors to contract")
+        
+        if len(core_tensor_list) == 1:
+            return self._get_tensor(core_tensor_list[0], cores_dict, circuit_states, measure_matrices)
+        
+        # Simple contraction of remaining tensors
+        tensors = [self._get_tensor(entry, cores_dict, circuit_states, measure_matrices) for entry in core_tensor_list]
+        
+        # Build simple einsum to contract all
+        # We can use the symbols already assigned to edges!
+        parts = []
+        output_symbols = []
+        
+        for entry in core_tensor_list:
+            part = ""
+            # We need to reconstruct the part string based on side and edges, similar to _contract_symmetric_group
+            # But here we assume all edges are contracted except maybe batch dims?
+            # Actually, if we are at the end, all edges should be contracted or open.
+            # Let's reuse the logic from _contract_symmetric_group but for all tensors at once.
             
-            if total_log_scale is None:
-                total_log_scale = t.log_scale
-            else:
-                total_log_scale += t.log_scale
-        else:
-            raw_tensor_list.append(t)
-    
-    # Execute contraction
-    if has_tntensor:
-        # print("  Using TNTensor contraction with scale handling.")
-        # print(f"  einsum eq: {einsum_eq} raw_tensor_list shapes: {[t.shape for t in raw_tensor_list]}")
-        # Use raw tensors for contraction
-        raw_result = torch.einsum(einsum_eq, *raw_tensor_list)
-    
-        # import numpy as np
-        # raw_result = raw_result.contiguous()
-        # tmp = raw_result.abs().max().detach().item()
-        # raw_result /= tmp
-        # total_scale *= tmp
-        # total_log_scale += np.log(tmp)
-
-        # result_tensor = TNTensor(raw_result / tmp, scale=total_scale * tmp, log_scale=total_log_scale + np.log(tmp))
-
-        # Create result TNTensor
-        result_tensor = TNTensor(raw_result, scale=total_scale, log_scale=total_log_scale)
-        # result_tensor = TNTensor(raw_result, scale=total_scale)
-
-        # tmp = result_tensor.tensor.abs().max()
-        
-        # result_tensor.auto_scale()
-    else:
-        result_tensor = torch.einsum(einsum_eq, *tensor_list)
-
-        # print(f"torch einsum einsum_eq: {einsum_eq}")
-        # for tt in tensor_list:
-        #     print(f"tt: {tt.shape} {tt}")
-        # print(f"result_tensor: {result_tensor.shape} {result_tensor}")
-
-    # print(f"  Result shape: {result_tensor.shape}")
-    
-    # Build remaining edges
-    remaining_in_edges = [edge for _, edge in collected_in_edges]
-    remaining_out_edges = [edge for _, edge in collected_out_edges]
-    
-    # Create new entry
-    new_core_idx = -1 - qubit_idx
-    
-    new_entry = {
-        'core_idx': new_core_idx,
-        'core_name': f"merged_{qubit_idx}",
-        'tensor': result_tensor,
-        'tensor_source': 'merged',
-        'tensor_key': None,
-        'in_edge_list': remaining_in_edges,
-        'out_edge_list': remaining_out_edges,
-        'side': TensorSide.MIDDLE,  # Merged is considered middle
-        'batch_symbol': new_batch_symbol,
-    }
-
-    # print(f"  Created new merged entry: {new_entry['core_name']} with shape {result_tensor.shape}")
-    # print(f"new_entry :\n{new_entry}")
-    
-    return new_entry
-
-
-def _contract_remaining(core_tensor_list: List[Dict], backend, cores_dict, circuit_states, measure_matrices) -> Any:
-    """
-    Contract any remaining tensors into final result.
-    """
-    import torch
-    import opt_einsum
-    
-    if len(core_tensor_list) == 0:
-        raise RuntimeError("No tensors to contract")
-    
-    if len(core_tensor_list) == 1:
-        return _get_tensor(core_tensor_list[0], cores_dict, circuit_states, measure_matrices)
-    
-    # Simple contraction of remaining tensors
-    tensors = [_get_tensor(entry, cores_dict, circuit_states, measure_matrices) for entry in core_tensor_list]
-    
-    # Build simple einsum to contract all
-    # We can use the symbols already assigned to edges!
-    parts = []
-    output_symbols = []
-    
-    for entry in core_tensor_list:
-        part = ""
-        # We need to reconstruct the part string based on side and edges, similar to _contract_symmetric_group
-        # But here we assume all edges are contracted except maybe batch dims?
-        # Actually, if we are at the end, all edges should be contracted or open.
-        # Let's reuse the logic from _contract_symmetric_group but for all tensors at once.
-        
-        # ... Actually, simpler to just use the symbols we assigned.
-        # But we need to handle the RIGHT version index reversal again.
-        
-        side = entry['side']
-        tensor = tensors[len(parts)] # corresponding tensor
-        
-        if side == TensorSide.MIDDLE:
-            mx_shape = tensor.shape
-            batch_ndim = len(mx_shape) - 2
-            if batch_ndim >= 1: part += 'a'
-            if batch_ndim >= 2: part += 'b'
-            if entry['in_edge_list']: part += entry['in_edge_list'][0]['symbol']
-            if entry['out_edge_list']: part += entry['out_edge_list'][0]['symbol']
+            # ... Actually, simpler to just use the symbols we assigned.
+            # But we need to handle the RIGHT version index reversal again.
             
-        elif side == TensorSide.RIGHT:
-            original_in_count = entry.get('original_in_edge_count', len(entry['out_edge_list']))
-            original_out_count = entry.get('original_out_edge_count', len(entry['in_edge_list']))
-            dim_symbols = [None] * tensor.ndim
+            side = entry['side']
+            tensor = tensors[len(parts)] # corresponding tensor
             
-            for i, edge in enumerate(entry['out_edge_list']):
-                dim_symbols[original_in_count - 1 - i] = edge['symbol']
-            for i, edge in enumerate(entry['in_edge_list']):
-                dim_symbols[original_in_count + original_out_count - 1 - i] = edge['symbol']
-            part = "".join(s for s in dim_symbols if s is not None)
+            if side == TensorSide.MIDDLE:
+                mx_shape = tensor.shape
+                batch_ndim = len(mx_shape) - 2
+                if batch_ndim >= 1: part += 'a'
+                if batch_ndim >= 2: part += 'b'
+                if entry['in_edge_list']: part += entry['in_edge_list'][0]['symbol']
+                if entry['out_edge_list']: part += entry['out_edge_list'][0]['symbol']
+                
+            elif side == TensorSide.RIGHT:
+                original_in_count = entry.get('original_in_edge_count', len(entry['out_edge_list']))
+                original_out_count = entry.get('original_out_edge_count', len(entry['in_edge_list']))
+                dim_symbols = [None] * tensor.ndim
+                
+                for i, edge in enumerate(entry['out_edge_list']):
+                    dim_symbols[original_in_count - 1 - i] = edge['symbol']
+                for i, edge in enumerate(entry['in_edge_list']):
+                    dim_symbols[original_in_count + original_out_count - 1 - i] = edge['symbol']
+                part = "".join(s for s in dim_symbols if s is not None)
+                
+            else: # LEFT or merged
+                for edge in entry['in_edge_list']: part += edge['symbol']
+                for edge in entry['out_edge_list']: part += edge['symbol']
+                
+                # For merged tensors, we might have batch dims 'a', 'b' if they were preserved
+                # But merged tensors store 'tensor' directly, so we don't need special handling for 'a','b' 
+                # UNLESS they are part of the tensor shape but not in edge list.
+                # In _contract_symmetric_group, we added 'a','b' to output_symbols.
+                # So the merged tensor will have 'a','b' as first dimensions.
+                # We need to account for that.
+                if entry.get('tensor_source') == 'merged':
+                    # Check if 'a' or 'b' are in the tensor shape
+                    # We can check if they were in the output symbols of the contraction that created it
+                    # But we don't have that info here easily.
+                    # However, 'a' and 'b' are global symbols for batch.
+                    # If the tensor has extra dims at start, they are likely batch dims.
+                    num_edges = len(entry['in_edge_list']) + len(entry['out_edge_list'])
+                    extra_dims = tensor.ndim - num_edges
+                    prefix = ""
+                    if extra_dims >= 1: prefix += 'a'
+                    if extra_dims >= 2: prefix += 'b'
+                    part = prefix + part
             
-        else: # LEFT or merged
-            for edge in entry['in_edge_list']: part += edge['symbol']
-            for edge in entry['out_edge_list']: part += edge['symbol']
+            parts.append(part)
             
-            # For merged tensors, we might have batch dims 'a', 'b' if they were preserved
-            # But merged tensors store 'tensor' directly, so we don't need special handling for 'a','b' 
-            # UNLESS they are part of the tensor shape but not in edge list.
-            # In _contract_symmetric_group, we added 'a','b' to output_symbols.
-            # So the merged tensor will have 'a','b' as first dimensions.
-            # We need to account for that.
-            if entry.get('tensor_source') == 'merged':
-                # Check if 'a' or 'b' are in the tensor shape
-                # We can check if they were in the output symbols of the contraction that created it
-                # But we don't have that info here easily.
-                # However, 'a' and 'b' are global symbols for batch.
-                # If the tensor has extra dims at start, they are likely batch dims.
-                num_edges = len(entry['in_edge_list']) + len(entry['out_edge_list'])
-                extra_dims = tensor.ndim - num_edges
-                prefix = ""
-                if extra_dims >= 1: prefix += 'a'
-                if extra_dims >= 2: prefix += 'b'
-                part = prefix + part
-        
-        parts.append(part)
-        
-        # Collect output symbols (batch dims)
-        if 'a' in part and 'a' not in output_symbols: output_symbols.append('a')
-        if 'b' in part and 'b' not in output_symbols: output_symbols.append('b')
+            # Collect output symbols (batch dims)
+            if 'a' in part and 'a' not in output_symbols: output_symbols.append('a')
+            if 'b' in part and 'b' not in output_symbols: output_symbols.append('b')
 
-    einsum_eq = ",".join(parts) + "->" + "".join(output_symbols)
-    
-    # print(f"[Greedy] Final contraction")
-    # print(f"  Einsum: {einsum_eq}")
-    
-    return torch.einsum(einsum_eq, *tensors)
+        einsum_eq = ",".join(parts) + "->" + "".join(output_symbols)
+        
+        # print(f"[Greedy] Final contraction")
+        # print(f"  Einsum: {einsum_eq}")
+        
+        return torch.einsum(einsum_eq, *tensors)

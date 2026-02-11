@@ -445,10 +445,15 @@ class EngineSiamese:
             cores_dict = {}
             for c_name in qctn.cores:
                 c = qctn.cores_weights[c_name]
+                is_tntensor = isinstance(c, TNTensor)
+
                 if isinstance(c, TNTensor):
                     c = c.tensor
                 if c.requires_grad:
-                    tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+                    if is_tntensor:
+                        tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+                    else:
+                        tensor = core_tensors_args[offset]
                     offset += 1
                 else:
                     tensor = c
@@ -460,7 +465,8 @@ class EngineSiamese:
                 for c_name in right_qctn.cores:
                     # print(f"right_qctn iter core: {c_name}")
                     c = right_qctn.cores_weights[c_name]
-                    
+
+                    # TODO: 
                     if isinstance(c, TNTensor):
                         c = c.tensor
                     if c.requires_grad:
@@ -472,6 +478,7 @@ class EngineSiamese:
             
             # print(f'cores_dict keys: {list(cores_dict.keys())}')
             # print(f'right_cores_dict keys: {list(right_cores_dict.keys())}')
+
 
             result = compute_fn(cores_dict, circuit_states, measure_input, right_cores_dict=right_cores_dict)
             

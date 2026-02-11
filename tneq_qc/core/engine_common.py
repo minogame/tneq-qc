@@ -52,7 +52,6 @@ class EngineCommon:
         self.contractor = EinsumStrategy()  # Keep for legacy methods
         self.strategy_compiler = StrategyCompiler(mode=strategy_mode)
         self.strategy_mode = strategy_mode
-        self.strategy_mode = strategy_mode
         self.mx_K = mx_K
         self.mx_weights = self._init_mx_weights(mx_K)
 

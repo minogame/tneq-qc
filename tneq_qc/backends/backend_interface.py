@@ -53,7 +53,7 @@ class ComputeBackend(ABC):
     gradient computation, and JIT compilation.
     """
     
-    def __init__(self, tensor_type: Optional[str] = None):
+    def __init__(self, tensor_type: Optional[str] = ""):
         """Initialize backend with BackendInfo.
 
         Args:

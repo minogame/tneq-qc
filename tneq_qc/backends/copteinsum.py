@@ -2,8 +2,12 @@ from __future__ import annotations
 from ..config import Configuration
 import itertools
 import opt_einsum
-import jax
-import jax.numpy as jnp
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    pass
+import math
 
 local_debug = True
 
