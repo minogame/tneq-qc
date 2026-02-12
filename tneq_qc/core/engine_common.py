@@ -8,6 +8,7 @@ Now supports strategy-based compilation for optimized contraction paths.
 """
 
 from __future__ import annotations
+from enum import Enum, auto
 from typing import Optional, Union, List, Tuple, Dict, Any
 import numpy as np
 import math
@@ -17,6 +18,60 @@ from ..backends.backend_factory import BackendFactory, ComputeBackend
 from .tn_tensor import TNTensor
 from tqdm import tqdm
 from .qctn import QCTN
+
+
+# ---------------------------------------------------------------------------
+# Per-qubit operation types
+# ---------------------------------------------------------------------------
+
+class QubitOp(Enum):
+    """Operation to perform on a single qubit during contraction.
+
+    Each qubit can be independently configured to one of these modes:
+
+    - ``TRACE``: Trace out (contract with identity matrix). The qubit
+      dimension is summed over and disappears from the result.
+    - ``CIRCUIT_LEFT``: Multiply the **left** (bra) side with a circuit
+      state vector.
+    - ``CIRCUIT_RIGHT``: Multiply the **right** (ket) side with a circuit
+      state vector.
+    - ``CIRCUIT_BOTH``: Multiply **both** bra and ket sides with circuit
+      state vectors.
+    - ``MEASURE``: Apply a measurement matrix (Mx) on this qubit.
+    - ``IDENTITY``: Leave untouched – equivalent to inserting an identity
+      but explicitly requested (no implicit fill).
+    """
+    TRACE = auto()
+    CIRCUIT_LEFT = auto()
+    CIRCUIT_RIGHT = auto()
+    CIRCUIT_BOTH = auto()
+    MEASURE = auto()
+    IDENTITY = auto()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline entry types
+# ---------------------------------------------------------------------------
+
+class PipelineEntryType(Enum):
+    """Type of a tensor-network component in the contraction pipeline.
+
+    - ``CIRCUIT``: A circuit state vector that will be attached to
+      input/output edges of the QCTN.
+    - ``MX``: A measurement matrix (e.g. from Hermite-polynomial data
+      generation) attached per-qubit.
+    - ``TN``: A raw tensor-network (QCTN instance) contracted as-is.
+    - ``TN_COPY``: A copy of a QCTN whose core weights are detached /
+      treated as constants.
+    - ``TN_HERMITIAN``: The Hermitian conjugate of a QCTN (transpose +
+      complex conjugate of each core, edges reversed).
+    """
+    CIRCUIT = auto()
+    MX = auto()
+    TN = auto()
+    TN_COPY = auto()
+    TN_HERMITIAN = auto()
+
 
 class EngineCommon:
     """
@@ -28,7 +83,7 @@ class EngineCommon:
     - ComputeBackend: Executes expressions using JAX, PyTorch, etc.
     """
 
-    def __init__(self, backend: Optional[Union[str, ComputeBackend]] = None, strategy_mode: str = 'balanced', mx_K: int = 100):
+    def __init__(self, backend: Optional[Union[str, ComputeBackend]] = None, strategy_mode: str = 'balanced', mx_K: int = 100, nqubits: Optional[int] = None):
         """
         Initialize the engine with a specific backend and strategy mode.
         
@@ -41,6 +96,9 @@ class EngineCommon:
                 - 'balanced': Use einsum + MPS chain (balanced)
                 - 'full': Use all available strategies (slowest compilation, best runtime)
             mx_K (int): Maximum order for Hermite polynomials (for data generation).
+            nqubits (int, optional): Total number of qubits.  If ``None``
+                (default), the value is inferred from the QCTN at
+                contraction time.
         """
         if backend is None:
             self.backend = BackendFactory.get_default_backend()
@@ -54,6 +112,461 @@ class EngineCommon:
         self.strategy_mode = strategy_mode
         self.mx_K = mx_K
         self.mx_weights = self._init_mx_weights(mx_K)
+
+        # ---- qubit-level operation config ----
+        self._nqubits: Optional[int] = nqubits
+        # Per-qubit operation map:  qubit_idx -> QubitOp
+        # Qubits not present default to TRACE at contraction time.
+        self._qubit_ops: Dict[int, QubitOp] = {}
+        # Auxiliary data attached to qubit ops (e.g. circuit vectors, Mx)
+        self._qubit_data: Dict[int, Any] = {}
+
+        # ---- contraction pipeline ----
+        # Ordered list of pipeline entries.  Each entry is a dict:
+        #   {
+        #       'name': str,           # user-defined label
+        #       'type': PipelineEntryType,
+        #       'qctn': QCTN | None,   # for TN / TN_COPY / TN_HERMITIAN
+        #       'data': Any | None,     # for CIRCUIT (vectors) / MX (matrices)
+        #   }
+        self._pipeline: List[Dict[str, Any]] = []
+
+    # ================================================================
+    # Qubit count helpers
+    # ================================================================
+
+    @property
+    def nqubits(self) -> Optional[int]:
+        """Return the configured number of qubits (may be ``None``)."""
+        return self._nqubits
+
+    @nqubits.setter
+    def nqubits(self, value: Optional[int]):
+        self._nqubits = value
+
+    def _resolve_nqubits(self, qctn: Optional[QCTN] = None) -> int:
+        """Return the effective qubit count.
+
+        Priority: explicit ``self._nqubits`` > ``qctn.nqubits``.
+
+        Raises:
+            ValueError: If the qubit count cannot be determined.
+        """
+        if self._nqubits is not None:
+            return self._nqubits
+        if qctn is not None:
+            return qctn.nqubits
+        raise ValueError(
+            "nqubits is not set and no QCTN was provided to infer it."
+        )
+
+    # ================================================================
+    # Per-qubit operation setters
+    # ================================================================
+
+    def set_partial_trace(self, qubit_indices: List[int]):
+        """Mark *qubit_indices* for trace (contract with identity).
+
+        All other qubits keep their current operation.
+
+        Args:
+            qubit_indices: List of qubit indices to trace out.
+        """
+        for qi in qubit_indices:
+            self._qubit_ops[qi] = QubitOp.TRACE
+            self._qubit_data.pop(qi, None)
+
+    def set_circuit_left(self, qubit_indices: List[int], vectors: Optional[List[Any]] = None):
+        """Attach circuit vectors on the **left** (bra) side.
+
+        Args:
+            qubit_indices: Qubit indices.
+            vectors: Optional list of state vectors (same length as
+                *qubit_indices*).  If ``None``, vectors must be supplied
+                later via the pipeline.
+        """
+        for i, qi in enumerate(qubit_indices):
+            self._qubit_ops[qi] = QubitOp.CIRCUIT_LEFT
+            if vectors is not None:
+                self._qubit_data[qi] = vectors[i]
+            else:
+                self._qubit_data.pop(qi, None)
+
+    def set_circuit_right(self, qubit_indices: List[int], vectors: Optional[List[Any]] = None):
+        """Attach circuit vectors on the **right** (ket) side.
+
+        Args:
+            qubit_indices: Qubit indices.
+            vectors: Optional list of state vectors.
+        """
+        for i, qi in enumerate(qubit_indices):
+            self._qubit_ops[qi] = QubitOp.CIRCUIT_RIGHT
+            if vectors is not None:
+                self._qubit_data[qi] = vectors[i]
+            else:
+                self._qubit_data.pop(qi, None)
+
+    def set_circuit_both(self, qubit_indices: List[int], vectors: Optional[List[Any]] = None):
+        """Attach circuit vectors on **both** bra and ket sides.
+
+        Args:
+            qubit_indices: Qubit indices.
+            vectors: Optional list of state vectors.
+        """
+        for i, qi in enumerate(qubit_indices):
+            self._qubit_ops[qi] = QubitOp.CIRCUIT_BOTH
+            if vectors is not None:
+                self._qubit_data[qi] = vectors[i]
+            else:
+                self._qubit_data.pop(qi, None)
+
+    def set_measure(self, qubit_indices: List[int], matrices: Optional[List[Any]] = None):
+        """Mark qubits for measurement (Mx matrices).
+
+        Args:
+            qubit_indices: Qubit indices.
+            matrices: Optional list of measurement matrices ``(B, K, K)``
+                or ``(K, K)`` per qubit.
+        """
+        for i, qi in enumerate(qubit_indices):
+            self._qubit_ops[qi] = QubitOp.MEASURE
+            if matrices is not None:
+                self._qubit_data[qi] = matrices[i]
+            else:
+                self._qubit_data.pop(qi, None)
+
+    def set_identity(self, qubit_indices: List[int]):
+        """Explicitly set qubits to identity (no-op, but explicit)."""
+        for qi in qubit_indices:
+            self._qubit_ops[qi] = QubitOp.IDENTITY
+            self._qubit_data.pop(qi, None)
+
+    def reset_qubit_ops(self):
+        """Clear all per-qubit operation settings.
+
+        After this call every qubit defaults to ``TRACE`` at contraction
+        time.
+        """
+        self._qubit_ops.clear()
+        self._qubit_data.clear()
+
+    def get_qubit_op(self, qubit_idx: int) -> QubitOp:
+        """Return the operation configured for *qubit_idx*.
+
+        Defaults to ``QubitOp.TRACE`` if not explicitly set.
+        """
+        return self._qubit_ops.get(qubit_idx, QubitOp.TRACE)
+
+    # ================================================================
+    # Contraction pipeline management
+    # ================================================================
+
+    def add_pipeline_entry(
+        self,
+        name: str,
+        entry_type: Union[str, PipelineEntryType],
+        qctn: Optional[QCTN] = None,
+        data: Any = None,
+    ):
+        """Append a component to the contraction pipeline.
+
+        Args:
+            name: A user-defined label for this entry.
+            entry_type: One of ``'circuit'``, ``'mx'``, ``'tn'``,
+                ``'tn_copy'``, ``'tn_hermitian'`` (or a
+                :class:`PipelineEntryType` enum value).
+            qctn: The QCTN instance (required for ``tn`` / ``tn_copy`` /
+                ``tn_hermitian`` types).
+            data: Auxiliary data – circuit state vectors (list) or
+                measurement matrices (list), depending on *entry_type*.
+        """
+        if isinstance(entry_type, str):
+            entry_type = PipelineEntryType[entry_type.upper()]
+
+        self._pipeline.append({
+            'name': name,
+            'type': entry_type,
+            'qctn': qctn,
+            'data': data,
+        })
+
+    def clear_pipeline(self):
+        """Remove all entries from the contraction pipeline."""
+        self._pipeline.clear()
+
+    # ================================================================
+    # Build helpers – convert qubit ops + pipeline into tensors
+    # ================================================================
+
+    def build_contraction_inputs(
+        self,
+        qctn: QCTN,
+        *,
+        mx_data: Optional[List[Any]] = None,
+        circuit_data: Optional[List[Any]] = None,
+        K: Optional[int] = None,
+    ) -> Tuple[Optional[List[Any]], List[Any]]:
+        """Build ``(circuit_states_list, measure_input_list)`` from the
+        current per-qubit operation settings.
+
+        For each qubit the method inspects ``self._qubit_ops[qi]`` and
+        produces the corresponding entry:
+
+        * ``TRACE`` / ``IDENTITY``: identity matrix ``I_K``.
+        * ``MEASURE``: the Mx matrix stored in ``self._qubit_data[qi]``
+          (or *mx_data[qi]* fallback).
+        * ``CIRCUIT_LEFT`` / ``CIRCUIT_RIGHT`` / ``CIRCUIT_BOTH``:
+          the circuit state vector stored in ``self._qubit_data[qi]``
+          (or *circuit_data[qi]* fallback).
+
+        Args:
+            qctn: The QCTN (used for ``nqubits``).
+            mx_data: Fallback Mx matrices indexed by qubit (optional).
+            circuit_data: Fallback circuit vectors indexed by qubit (optional).
+            K: Dimension for identity matrices (inferred from data if not
+                given).
+
+        Returns:
+            ``(circuit_states_list, measure_input_list)`` suitable for
+            ``contract_with_compiled_strategy``.
+        """
+        n = self._resolve_nqubits(qctn)
+
+        # --- Infer K ---
+        if K is None:
+            for qi in range(n):
+                d = self._qubit_data.get(qi)
+                if d is not None:
+                    K = d.shape[-1]
+                    break
+            if K is None and mx_data is not None:
+                for m in mx_data:
+                    if m is not None:
+                        K = m.shape[-1]
+                        break
+            if K is None:
+                raise ValueError(
+                    "Cannot infer K (qubit dimension). Provide K explicitly "
+                    "or set measurement / circuit data first."
+                )
+
+        # --- Identity template ---
+        ident = self.backend.eye(K)
+
+        # Detect batch dimension from the first available Mx / circuit tensor
+        batch_size: Optional[int] = None
+        for qi in range(n):
+            d = self._qubit_data.get(qi)
+            if d is not None and d.ndim >= 3:
+                batch_size = d.shape[0]
+                break
+        if batch_size is None and mx_data is not None:
+            for m in mx_data:
+                if m is not None and m.ndim >= 3:
+                    batch_size = m.shape[0]
+                    break
+
+        if batch_size is not None:
+            ident = self.backend.unsqueeze(ident, 0)
+            ident = self.backend.expand(ident, batch_size, -1, -1)
+
+        circuit_states_list: Optional[List[Any]] = None
+        has_circuit = any(
+            self._qubit_ops.get(qi, QubitOp.TRACE) in (
+                QubitOp.CIRCUIT_LEFT,
+                QubitOp.CIRCUIT_RIGHT,
+                QubitOp.CIRCUIT_BOTH,
+            )
+            for qi in range(n)
+        )
+        if has_circuit:
+            circuit_states_list = []
+
+        measure_input_list: List[Any] = []
+
+        for qi in range(n):
+            op = self._qubit_ops.get(qi, QubitOp.TRACE)
+
+            if op in (QubitOp.TRACE, QubitOp.IDENTITY):
+                measure_input_list.append(ident)
+                if circuit_states_list is not None:
+                    circuit_states_list.append(None)
+
+            elif op == QubitOp.MEASURE:
+                mx = self._qubit_data.get(qi)
+                if mx is None and mx_data is not None:
+                    mx = mx_data[qi]
+                if mx is None:
+                    raise ValueError(
+                        f"QubitOp.MEASURE on qubit {qi} but no Mx data "
+                        f"provided."
+                    )
+                measure_input_list.append(mx)
+                if circuit_states_list is not None:
+                    circuit_states_list.append(None)
+
+            elif op in (QubitOp.CIRCUIT_LEFT, QubitOp.CIRCUIT_RIGHT, QubitOp.CIRCUIT_BOTH):
+                vec = self._qubit_data.get(qi)
+                if vec is None and circuit_data is not None:
+                    vec = circuit_data[qi]
+                if vec is None:
+                    raise ValueError(
+                        f"QubitOp {op.name} on qubit {qi} but no circuit "
+                        f"state vector provided."
+                    )
+                # For circuit qubits the measure slot is identity (the
+                # circuit vector is handled separately by the strategy).
+                measure_input_list.append(ident)
+                if circuit_states_list is not None:
+                    circuit_states_list.append(vec)
+            else:
+                # Fallback – identity
+                measure_input_list.append(ident)
+                if circuit_states_list is not None:
+                    circuit_states_list.append(None)
+
+        return circuit_states_list, measure_input_list
+
+    def run_pipeline(
+        self,
+        qctn: Optional[QCTN] = None,
+        *,
+        mx_data: Optional[List[Any]] = None,
+        circuit_data: Optional[List[Any]] = None,
+        K: Optional[int] = None,
+        right_qctn: Union[str, QCTN, None] = "symmetric",
+        measure_is_matrix: bool = True,
+        ret_type: str = 'tensor',
+    ):
+        """Execute the contraction using current qubit-ops and pipeline.
+
+        This is the top-level convenience method.  It:
+
+        1. Resolves ``nqubits`` from *qctn* (if not pre-set).
+        2. Calls :meth:`build_contraction_inputs` to derive
+           ``circuit_states_list`` and ``measure_input_list``.
+        3. Determines ``right_qctn`` from the pipeline if applicable.
+        4. Delegates to :meth:`contract_with_compiled_strategy`.
+
+        Args:
+            qctn: The primary QCTN.  Can be ``None`` if the pipeline
+                contains a ``TN`` entry whose QCTN should be used.
+            mx_data: Fallback Mx matrices (by qubit).
+            circuit_data: Fallback circuit vectors (by qubit).
+            K: Qubit dimension (inferred if ``None``).
+            right_qctn: The right-side QCTN or ``"symmetric"`` /
+                ``None``.  If the pipeline contains a
+                ``TN_COPY`` / ``TN_HERMITIAN`` entry, that entry's
+                QCTN is used as *right_qctn*.
+            measure_is_matrix: Whether the measure inputs are matrices.
+            ret_type: ``'tensor'`` or ``'TNTensor'``.
+
+        Returns:
+            Contraction result.
+        """
+        # --- Resolve primary QCTN from pipeline if needed ---
+        if qctn is None:
+            for entry in self._pipeline:
+                if entry['type'] == PipelineEntryType.TN and entry['qctn'] is not None:
+                    qctn = entry['qctn']
+                    break
+        if qctn is None:
+            raise ValueError(
+                "No QCTN provided and none found in the pipeline."
+            )
+
+        # --- Resolve right_qctn from pipeline ---
+        for entry in self._pipeline:
+            if entry['type'] in (PipelineEntryType.TN_COPY, PipelineEntryType.TN_HERMITIAN):
+                if entry['qctn'] is not None:
+                    right_qctn = entry['qctn']
+                    break
+
+        # --- Merge pipeline data into qubit_data if not already set ---
+        for entry in self._pipeline:
+            if entry['type'] == PipelineEntryType.MX and entry['data'] is not None:
+                # entry['data'] should be a list indexed by qubit
+                if mx_data is None:
+                    mx_data = entry['data']
+            elif entry['type'] == PipelineEntryType.CIRCUIT and entry['data'] is not None:
+                if circuit_data is None:
+                    circuit_data = entry['data']
+
+        # --- Build contraction input lists ---
+        circuit_states_list, measure_input_list = self.build_contraction_inputs(
+            qctn,
+            mx_data=mx_data,
+            circuit_data=circuit_data,
+            K=K,
+        )
+
+        # --- Contract ---
+        return self.contract_with_compiled_strategy(
+            qctn,
+            circuit_states_list=circuit_states_list,
+            measure_input_list=measure_input_list,
+            measure_is_matrix=measure_is_matrix,
+            right_qctn=right_qctn,
+            ret_type=ret_type,
+        )
+
+    def run_pipeline_for_gradient(
+        self,
+        qctn: Optional[QCTN] = None,
+        *,
+        mx_data: Optional[List[Any]] = None,
+        circuit_data: Optional[List[Any]] = None,
+        K: Optional[int] = None,
+        right_qctn: Union[str, QCTN, None] = "symmetric",
+        measure_is_matrix: bool = True,
+    ) -> Tuple:
+        """Like :meth:`run_pipeline` but returns ``(loss, grads)``.
+
+        Delegates to :meth:`contract_with_compiled_strategy_for_gradient`.
+        """
+        # --- Resolve primary QCTN from pipeline if needed ---
+        if qctn is None:
+            for entry in self._pipeline:
+                if entry['type'] == PipelineEntryType.TN and entry['qctn'] is not None:
+                    qctn = entry['qctn']
+                    break
+        if qctn is None:
+            raise ValueError(
+                "No QCTN provided and none found in the pipeline."
+            )
+
+        # --- Resolve right_qctn from pipeline ---
+        for entry in self._pipeline:
+            if entry['type'] in (PipelineEntryType.TN_COPY, PipelineEntryType.TN_HERMITIAN):
+                if entry['qctn'] is not None:
+                    right_qctn = entry['qctn']
+                    break
+
+        # --- Merge pipeline data ---
+        for entry in self._pipeline:
+            if entry['type'] == PipelineEntryType.MX and entry['data'] is not None:
+                if mx_data is None:
+                    mx_data = entry['data']
+            elif entry['type'] == PipelineEntryType.CIRCUIT and entry['data'] is not None:
+                if circuit_data is None:
+                    circuit_data = entry['data']
+
+        # --- Build contraction input lists ---
+        circuit_states_list, measure_input_list = self.build_contraction_inputs(
+            qctn,
+            mx_data=mx_data,
+            circuit_data=circuit_data,
+            K=K,
+        )
+
+        # --- Contract for gradient ---
+        return self.contract_with_compiled_strategy_for_gradient(
+            qctn,
+            circuit_states_list=circuit_states_list,
+            measure_input_list=measure_input_list,
+            measure_is_matrix=measure_is_matrix,
+            right_qctn=right_qctn,
+        )
 
     def _init_mx_weights(self, k_max):
         """Initialize normalization weights for Hermite polynomials.
@@ -444,10 +957,14 @@ class EngineCommon:
             cores_dict = {}
             for c_name in qctn.cores:
                 c = qctn.cores_weights[c_name]
+                is_tntensor = isinstance(c, TNTensor)
                 if isinstance(c, TNTensor):
                     c = c.tensor
                 if c.requires_grad:
-                    tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+                    if is_tntensor:
+                        tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+                    else:
+                        tensor = core_tensors_args[offset]
                     offset += 1
                 else:
                     tensor = c

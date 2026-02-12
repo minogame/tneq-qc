@@ -277,6 +277,32 @@ class QCTNHelper:
 
                 return graph.rstrip()
 
+            def generate_circuit_graph(n, dim_char='2'):
+                graph = ""
+                import opt_einsum
+                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
+
+                if dim_char is None:
+                    dim_char = '2'
+                
+                for i in range(n):
+                    graph += "-" + char_list[i] + "-" + dim_char + "-\n"
+                return graph
+                
+            
+            def generate_mx_graph(n, dim_char='2'):
+                graph = ""
+                import opt_einsum
+                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
+
+                if dim_char is None:
+                    dim_char = '2'
+                
+                for i in range(n):
+                    graph += "-" + dim_char + "-" + char_list[i] + "-" + dim_char + "-\n"
+                return graph
+
+
             if graph_type == "mps":
                 return generate_mps_graph(n, dim_char)
             elif graph_type == "tree":
@@ -286,9 +312,14 @@ class QCTNHelper:
                 # Default to n layers if not specified
                 L = 4
                 return generate_wall_graph(n, L, dim_char)
-        
+            elif graph_type == "circuit":
+                return generate_circuit_graph(n, dim_char)
+            elif graph_type == "mx":
+                return generate_mx_graph(n, dim_char)
+
             return generate_mps_graph(n, dim_char)
 
+            
             # return  "-3-A-3-"
             # return  "-3-A-3-B-3-C-3-D-3-"
 
@@ -635,8 +666,20 @@ class QCTN:
             # if qubit_idx == 2000:
             #     print(line)
             line = line.strip().replace("-", "")
-            input_rank, input_core = input_pattern.match(line).groups()
-            output_core, output_rank = output_pattern.search(line).groups()
+            m_input = input_pattern.match(line)
+            m_output = output_pattern.search(line)
+            
+            if m_input is None or m_output is None:
+                # raise ValueError(
+                #     f"Qubit {qubit_idx}: failed to parse line '{self.qubits[qubit_idx].strip()}' "
+                #     f"(cleaned: '{line}'). "
+                #     f"{'input pattern not matched' if m_input is None else 'output pattern not matched'}."
+                # )
+
+                return
+            
+            input_rank, input_core = m_input.groups() if m_input else (0, None)
+            output_core, output_rank = m_output.groups() if m_output else (None, 0)
             input_rank, output_rank = int(input_rank), int(output_rank)
             input_core_idx = dict_core2idx[input_core]
             output_core_idx = dict_core2idx[output_core]

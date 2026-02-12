@@ -477,6 +477,7 @@ class EngineSiamese:
                     right_cores_dict[c_name] = tensor
             
             # print(f'cores_dict keys: {list(cores_dict.keys())}')
+            # print(f"core a tensor {cores_dict['a']}")
             # print(f'right_cores_dict keys: {list(right_cores_dict.keys())}')
 
 
