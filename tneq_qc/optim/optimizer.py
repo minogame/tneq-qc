@@ -77,12 +77,14 @@ class Optimizer:
 
         # exit()
 
+        loss_value = 0
+
         while self.iter < self.max_iter:
             # TODO: impl general function named contract_for_gradient
             data_index = self.iter % len(data_list)
             # loss, grads = self.engine.contract_with_self_for_gradient(qctn, **data_list[data_index], **kwargs)
             # loss, grads = self.engine.contract_with_std_graph_for_gradient(qctn, **data_list[data_index], **kwargs)
-            loss, grads = self.engine.contract_with_compiled_strategy_for_gradient(qctn, **data_list[data_index], **kwargs)
+            loss, params_list, grads = self.engine.contract_with_compiled_strategy_for_gradient(qctn, **data_list[data_index], **kwargs)
 
             # Convert loss to scalar for comparison and printing
             loss_value = float(loss) if hasattr(loss, 'item') else loss
@@ -101,9 +103,9 @@ class Optimizer:
                 print(f"Convergence achieved at iteration {self.iter} with loss {loss_value}.")
                 break
             
-            print(f"Iteration {self.iter}: loss = {loss_value} lr = {self.learning_rate}")
+            # print(f"Iteration {self.iter}: loss = {loss_value} lr = {self.learning_rate}")
 
-            self.step(qctn, grads)
+            self.step(params_list, grads)
 
             # Step-based evaluation hook
             eval_every = getattr(self, "eval_every", 0)
@@ -140,6 +142,8 @@ class Optimizer:
             self.iter += 1
         else:
             print(f"Maximum iterations reached: {self.max_iter} with final loss {loss_value}.")
+
+        return loss_value
 
     def optimize_debug(self, qctn, data_list, **kwargs):
         """
@@ -247,7 +251,7 @@ class Optimizer:
             print(f"Maximum iterations reached: {self.max_iter} with final loss {loss_value}.")
 
 
-    def step(self, qctn, grads):
+    def step(self, params_list, grads):
         """
         Perform a single optimization step.
         
@@ -258,11 +262,7 @@ class Optimizer:
         Returns:
             None: The function modifies the qctn parameters in place.
         """
-        # Prepare params list (ensure order matches grads)
-        # grads is a list corresponding to qctn.cores
-        param_keys = qctn.cores
-        params_list = [qctn.cores_weights[k] for k in param_keys]
-        
+
         hyperparams = {
             'learning_rate': self.learning_rate,
             'beta1': self.beta1,
@@ -277,9 +277,5 @@ class Optimizer:
             params_list, grads, self.opt_state, self.method, hyperparams
         )
         
-        # Update params in qctn
-        for k, p in zip(param_keys, new_params_list):
-            qctn.cores_weights[k] = p
-            
         self.opt_state = new_state
         

@@ -14,36 +14,40 @@ logger = logging.getLogger(__name__)
 
 # --- 1. 业务逻辑类 (Mock) ---
 
-class Trainer:
-    """Worker: 负责训练"""
-    def run(self, tn_struct, weights):
-        # 模拟训练耗时
-        time.sleep(1.0)
+# class Trainer:
+#     """Worker: 负责训练"""
+#     def run(self, tn_struct, weights):
+#         # 模拟训练耗时
+#         time.sleep(1.0)
         
-        # 简单模拟：让参数发生一点变化，证明训练了
-        new_weights = [w + 0.01 for w in weights]
-        loss = torch.tensor(0.1) # Mock loss
-        return new_weights, loss
+#         # 简单模拟：让参数发生一点变化，证明训练了
+#         new_weights = [w + 0.01 for w in weights]
+#         loss = torch.tensor(0.1) # Mock loss
+#         return new_weights, loss
 
-class Manager:
-    """Master: 负责生成结构"""
-    def _create_mock_tensors(self):
-        return [torch.eye(5) for _ in range(10)]
+from easy_trainer import Trainer
 
-    def generate(self, iteration, prev_results=None):
-        new_tasks = []
-        if prev_results is None:
-            logger.info(f"[Master] Iteration {iteration}: Initializing population...")
-            for i in range(5):
-                tn_struct = f"Gen{iteration}_Struct{i}"
-                weights = self._create_mock_tensors()
-                new_tasks.append({'struct': tn_struct, 'weights': weights})
-        else:
-            logger.info(f"[Master] Iteration {iteration}: Evolving...")
-            for res in prev_results:
-                # 简单逻辑：继承上一代
-                new_tasks.append({'struct': res['struct'], 'weights': res['weights']})
-        return new_tasks
+# class Manager:
+#     """Master: 负责生成结构"""
+#     def _create_mock_tensors(self):
+#         return [torch.eye(4) for _ in range(5)]
+
+#     def generate(self, iteration, prev_results=None):
+#         new_tasks = []
+#         if prev_results is None:
+#             logger.info(f"[Master] Iteration {iteration}: Initializing population...")
+#             for i in range(5):
+#                 tn_struct = f"Gen{iteration}_Struct{i}"
+#                 weights = self._create_mock_tensors()
+#                 new_tasks.append({'struct': tn_struct, 'weights': weights})
+#         else:
+#             logger.info(f"[Master] Iteration {iteration}: Evolving...")
+#             for res in prev_results:
+#                 # 简单逻辑：继承上一代
+#                 new_tasks.append({'struct': res['struct'], 'weights': res['weights']})
+#         return new_tasks
+
+from easy_manager import Manager
 
 # --- 2. 分布式通信封装 ---
 
@@ -164,7 +168,7 @@ def run_worker(rank):
         logger.info(f"[Worker {rank}] Received Task: {task['struct']}")
         
         # 3. 训练
-        new_weights, loss = trainer.run(task['struct'], task['weights'])
+        loss, new_weights = trainer.run(task['struct'], task['weights'])
         
         # 4. 发送结果
         result = {

@@ -427,77 +427,87 @@ class EngineCommon:
 
         return circuit_states_list, measure_input_list
 
+    def _resolve_pipeline_inputs(
+        self,
+        qctn_list: List[Any],
+    ) -> Tuple:
+        """Map *qctn_list* to pipeline entries and resolve inputs.
+
+        Each element of *qctn_list* corresponds positionally to an entry
+        in ``self._pipeline``.  Depending on the entry type the element
+        is interpreted as:
+
+        - ``TN`` → primary QCTN
+        - ``TN_COPY`` / ``TN_HERMITIAN`` → right-side QCTN
+        - ``MX`` → measurement data (list of matrices per qubit)
+        - ``CIRCUIT`` → circuit state data (list of vectors per qubit)
+
+        Returns:
+            ``(qctn, right_qctn, mx_data, circuit_data, measure_is_matrix)``
+        """
+        if len(qctn_list) != len(self._pipeline):
+            raise ValueError(
+                f"qctn_list length ({len(qctn_list)}) does not match "
+                f"pipeline length ({len(self._pipeline)})."
+            )
+
+        qctn: Optional[QCTN] = None
+        right_qctn: Union[str, QCTN, None] = "symmetric"
+        mx_data: Optional[List[Any]] = None
+        circuit_data: Optional[List[Any]] = None
+        measure_is_matrix: bool = True
+
+        for item, entry in zip(qctn_list, self._pipeline):
+            etype = entry['type']
+            if etype == PipelineEntryType.TN:
+                qctn = item
+            elif etype in (PipelineEntryType.TN_COPY, PipelineEntryType.TN_HERMITIAN):
+                right_qctn = item
+            elif etype == PipelineEntryType.MX:
+                mx_data = item
+            elif etype == PipelineEntryType.CIRCUIT:
+                circuit_data = item
+
+        if qctn is None:
+            raise ValueError(
+                "No QCTN found in qctn_list for a TN pipeline entry."
+            )
+
+        return qctn, right_qctn, mx_data, circuit_data, measure_is_matrix
+
     def run_pipeline(
         self,
-        qctn: Optional[QCTN] = None,
+        qctn_list: List[Any],
         *,
-        mx_data: Optional[List[Any]] = None,
-        circuit_data: Optional[List[Any]] = None,
-        K: Optional[int] = None,
-        right_qctn: Union[str, QCTN, None] = "symmetric",
-        measure_is_matrix: bool = True,
         ret_type: str = 'tensor',
     ):
         """Execute the contraction using current qubit-ops and pipeline.
 
         This is the top-level convenience method.  It:
 
-        1. Resolves ``nqubits`` from *qctn* (if not pre-set).
+        1. Maps ``qctn_list`` to pipeline entries positionally to
+           resolve the primary QCTN, right QCTN, mx data, and circuit data.
         2. Calls :meth:`build_contraction_inputs` to derive
            ``circuit_states_list`` and ``measure_input_list``.
-        3. Determines ``right_qctn`` from the pipeline if applicable.
-        4. Delegates to :meth:`contract_with_compiled_strategy`.
+        3. Delegates to :meth:`contract_with_compiled_strategy`.
 
         Args:
-            qctn: The primary QCTN.  Can be ``None`` if the pipeline
-                contains a ``TN`` entry whose QCTN should be used.
-            mx_data: Fallback Mx matrices (by qubit).
-            circuit_data: Fallback circuit vectors (by qubit).
-            K: Qubit dimension (inferred if ``None``).
-            right_qctn: The right-side QCTN or ``"symmetric"`` /
-                ``None``.  If the pipeline contains a
-                ``TN_COPY`` / ``TN_HERMITIAN`` entry, that entry's
-                QCTN is used as *right_qctn*.
-            measure_is_matrix: Whether the measure inputs are matrices.
+            qctn_list: A list of objects corresponding positionally to
+                the pipeline entries.  For example
+                ``[circuit_qctn, qctn, mx]``.
             ret_type: ``'tensor'`` or ``'TNTensor'``.
 
         Returns:
             Contraction result.
         """
-        # --- Resolve primary QCTN from pipeline if needed ---
-        if qctn is None:
-            for entry in self._pipeline:
-                if entry['type'] == PipelineEntryType.TN and entry['qctn'] is not None:
-                    qctn = entry['qctn']
-                    break
-        if qctn is None:
-            raise ValueError(
-                "No QCTN provided and none found in the pipeline."
-            )
-
-        # --- Resolve right_qctn from pipeline ---
-        for entry in self._pipeline:
-            if entry['type'] in (PipelineEntryType.TN_COPY, PipelineEntryType.TN_HERMITIAN):
-                if entry['qctn'] is not None:
-                    right_qctn = entry['qctn']
-                    break
-
-        # --- Merge pipeline data into qubit_data if not already set ---
-        for entry in self._pipeline:
-            if entry['type'] == PipelineEntryType.MX and entry['data'] is not None:
-                # entry['data'] should be a list indexed by qubit
-                if mx_data is None:
-                    mx_data = entry['data']
-            elif entry['type'] == PipelineEntryType.CIRCUIT and entry['data'] is not None:
-                if circuit_data is None:
-                    circuit_data = entry['data']
+        qctn, right_qctn, mx_data, circuit_data, measure_is_matrix = \
+            self._resolve_pipeline_inputs(qctn_list)
 
         # --- Build contraction input lists ---
         circuit_states_list, measure_input_list = self.build_contraction_inputs(
             qctn,
             mx_data=mx_data,
             circuit_data=circuit_data,
-            K=K,
         )
 
         # --- Contract ---
@@ -512,51 +522,25 @@ class EngineCommon:
 
     def run_pipeline_for_gradient(
         self,
-        qctn: Optional[QCTN] = None,
-        *,
-        mx_data: Optional[List[Any]] = None,
-        circuit_data: Optional[List[Any]] = None,
-        K: Optional[int] = None,
-        right_qctn: Union[str, QCTN, None] = "symmetric",
-        measure_is_matrix: bool = True,
+        qctn_list: List[Any],
     ) -> Tuple:
         """Like :meth:`run_pipeline` but returns ``(loss, grads)``.
 
         Delegates to :meth:`contract_with_compiled_strategy_for_gradient`.
+
+        Args:
+            qctn_list: A list of objects corresponding positionally to
+                the pipeline entries.  For example
+                ``[circuit_qctn, qctn, mx]``.
         """
-        # --- Resolve primary QCTN from pipeline if needed ---
-        if qctn is None:
-            for entry in self._pipeline:
-                if entry['type'] == PipelineEntryType.TN and entry['qctn'] is not None:
-                    qctn = entry['qctn']
-                    break
-        if qctn is None:
-            raise ValueError(
-                "No QCTN provided and none found in the pipeline."
-            )
-
-        # --- Resolve right_qctn from pipeline ---
-        for entry in self._pipeline:
-            if entry['type'] in (PipelineEntryType.TN_COPY, PipelineEntryType.TN_HERMITIAN):
-                if entry['qctn'] is not None:
-                    right_qctn = entry['qctn']
-                    break
-
-        # --- Merge pipeline data ---
-        for entry in self._pipeline:
-            if entry['type'] == PipelineEntryType.MX and entry['data'] is not None:
-                if mx_data is None:
-                    mx_data = entry['data']
-            elif entry['type'] == PipelineEntryType.CIRCUIT and entry['data'] is not None:
-                if circuit_data is None:
-                    circuit_data = entry['data']
+        qctn, right_qctn, mx_data, circuit_data, measure_is_matrix = \
+            self._resolve_pipeline_inputs(qctn_list)
 
         # --- Build contraction input lists ---
         circuit_states_list, measure_input_list = self.build_contraction_inputs(
             qctn,
             mx_data=mx_data,
             circuit_data=circuit_data,
-            K=K,
         )
 
         # --- Contract for gradient ---

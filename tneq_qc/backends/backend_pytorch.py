@@ -119,46 +119,20 @@ class BackendPyTorch(ComputeBackend):
             else:
                 arg_indices = [argnums]
 
-            # Prepare tensors and enable gradients for specified arguments
-            tensor_args = []
-            for i, arg in enumerate(args):
-                # 统一通过 convert_to_tensor 放到正确的 device / dtype 上
-                if not isinstance(arg, self.torch.Tensor):
-                    arg = self.convert_to_tensor(arg)
-                else:
-                    arg = self.convert_to_tensor(arg)
-
-                if i in arg_indices:
-                    # Enable gradient tracking for parameters to optimize
-                    arg.requires_grad_(True)
-                else:
-                    # Disable gradient tracking for other tensors
-                    arg.requires_grad_(False)
-                
-                tensor_args.append(arg)
-
             # Compute loss
-            loss = loss_fn(*tensor_args)
+            loss = loss_fn(*args)
+            
+            if loss.ndim > 0:
+                loss = loss.sum()
 
-            # PyTorch autograd.grad 只支持对实数标量求导；若 loss 为复数则对 loss.real 求导
-            if self.is_complex(loss):
-                loss_for_grad = loss.real
-            else:
-                loss_for_grad = loss
-            if loss_for_grad.ndim > 0:
-                loss_for_grad = loss_for_grad.sum()
-
-            # Compute gradients using torch.autograd.grad
-            grad_tensors = [tensor_args[i] for i in arg_indices]
             gradients = self.torch.autograd.grad(
-                outputs=loss_for_grad,
-                inputs=grad_tensors,
+                outputs=loss,
+                inputs=args,
                 create_graph=False,
                 retain_graph=False
             )
 
-            # 返回值：loss 为复数时返回实部标量，便于日志/比较
-            out_loss = loss.real.detach() if self.is_complex(loss) else loss.detach()
+            out_loss = loss.detach()
             if out_loss.ndim > 0:
                 out_loss = out_loss.sum()
             return out_loss, gradients
@@ -205,6 +179,9 @@ class BackendPyTorch(ComputeBackend):
         with self.torch.no_grad():
             raw_params = []
             is_tntensor_info = []
+
+            # print('params: ', params, len(params))
+            # print('grads: ', grads, len(grads))
             
             for p in params:
                 if hasattr(p, 'tensor') and hasattr(p, 'scale') and hasattr(p, 'auto_scale'):
@@ -252,17 +229,19 @@ class BackendPyTorch(ComputeBackend):
                 if is_tn:
                     # new_raw_params[i] *= scale
 
-                    params[i] = tn_class(new_raw_params[i] / scale, scale)
+                    # params[i] = tn_class(new_raw_params[i] / scale, scale)
                     # params[i] = tn_class(new_raw_params[i])
 
                     # params[i] = tn_class(new_raw_params[i], 1.0)
                     # params[i].scale_to(scale)
                     # params[i].auto_scale()
 
+                    params[i].set(new_raw_params[i] / scale, scale)
                     params[i].tensor.requires_grad_(True)
                     # params[i].tensor.grad.zero_()
                 else:
-                    params[i] = new_raw_params[i]
+                    # params[i] = new_raw_params[i]
+                    params[i].data = new_raw_params[i].data
                     params[i].requires_grad_(True)
                     
             return params, new_state

@@ -402,82 +402,109 @@ class EngineSiamese:
             strategy_name = cached['strategy_name']
             # print(f"[EngineSiamese] Using cached strategy: {strategy_name}")
 
-        # Prepare tensors for gradient calculation
-        # We need to separate tensors (which require grad) from scales (constants)
-        raw_core_tensors = []
-        core_scales = []
+        trainable_cores = []
         for c_name in qctn.cores:
             c = qctn.cores_weights[c_name]
-            # print(f"qctn cores grad {c_name} {c.tensor.requires_grad}")
-            if isinstance(c, TNTensor) and not c.tensor.requires_grad:
-                continue
-            if not isinstance(c, TNTensor) and not c.requires_grad:
-                continue
-            if isinstance(c, TNTensor):
-                raw_core_tensors.append(c.tensor)
-                core_scales.append(c.scale)
-            else:
-                raw_core_tensors.append(c)
-                core_scales.append(1.0)
+            if isinstance(c, TNTensor) and c.tensor.requires_grad:
+                trainable_cores.append(c)
+            elif not isinstance(c, TNTensor) and c.requires_grad:
+                trainable_cores.append(c)
         
-        # print(f"raw_core_tensors {len(raw_core_tensors)}")
-
         if right_qctn is not None and isinstance(right_qctn, QCTN):
             for c_name in right_qctn.cores:
                 c = right_qctn.cores_weights[c_name]
-                if isinstance(c, TNTensor) and not c.tensor.requires_grad:
-                    continue
-                if not isinstance(c, TNTensor) and not c.requires_grad:
-                    continue
-                c = right_qctn.cores_weights[c_name]
-                if isinstance(c, TNTensor):
-                    raw_core_tensors.append(c.tensor)
-                    core_scales.append(c.scale)
-                else:
-                    raw_core_tensors.append(c)
-                    core_scales.append(1.0)
+                if isinstance(c, TNTensor) and c.tensor.requires_grad:
+                    trainable_cores.append(c)
+                elif not isinstance(c, TNTensor) and c.requires_grad:
+                    trainable_cores.append(c)
+
+        # Prepare tensors for gradient calculation
+        # We need to separate tensors (which require grad) from scales (constants)
+        # raw_core_tensors = []
+        # core_scales = []
+        # for c_name in qctn.cores:
+        #     c = qctn.cores_weights[c_name]
+        #     # print(f"qctn cores grad {c_name} {c.tensor.requires_grad}")
+        #     if isinstance(c, TNTensor) and not c.tensor.requires_grad:
+        #         continue
+        #     if not isinstance(c, TNTensor) and not c.requires_grad:
+        #         continue
+        #     if isinstance(c, TNTensor):
+        #         raw_core_tensors.append(c.tensor)
+        #         core_scales.append(c.scale)
+        #     else:
+        #         raw_core_tensors.append(c)
+        #         core_scales.append(1.0)
+        
+        # # print(f"raw_core_tensors {len(raw_core_tensors)}")
+
+        # if right_qctn is not None and isinstance(right_qctn, QCTN):
+        #     for c_name in right_qctn.cores:
+        #         c = right_qctn.cores_weights[c_name]
+        #         if isinstance(c, TNTensor) and not c.tensor.requires_grad:
+        #             continue
+        #         if not isinstance(c, TNTensor) and not c.requires_grad:
+        #             continue
+        #         c = right_qctn.cores_weights[c_name]
+        #         if isinstance(c, TNTensor):
+        #             raw_core_tensors.append(c.tensor)
+        #             core_scales.append(c.scale)
+        #         else:
+        #             raw_core_tensors.append(c)
+        #             core_scales.append(1.0)
         
         # Define loss function
         def loss_fn(*core_tensors_args):
             
             offset = 0
 
-            cores_dict = {}
-            for c_name in qctn.cores:
-                c = qctn.cores_weights[c_name]
-                is_tntensor = isinstance(c, TNTensor)
+            cores_dict = qctn.cores_weights
 
-                if isinstance(c, TNTensor):
-                    c = c.tensor
-                if c.requires_grad:
-                    if is_tntensor:
-                        tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
-                    else:
-                        tensor = core_tensors_args[offset]
-                    offset += 1
-                else:
-                    tensor = c
-                
-                cores_dict[c_name] = tensor
-            
             right_cores_dict = {}
             if right_qctn is not None and isinstance(right_qctn, QCTN):
-                for c_name in right_qctn.cores:
-                    # print(f"right_qctn iter core: {c_name}")
-                    c = right_qctn.cores_weights[c_name]
+                right_cores_dict = right_qctn.cores_weights
 
-                    # TODO: 
-                    if isinstance(c, TNTensor):
-                        c = c.tensor
-                    if c.requires_grad:
-                        tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
-                        offset += 1
-                    else:
-                        tensor = c
-                    right_cores_dict[c_name] = tensor
+            # cores_dict = {}
+            # for c_name in qctn.cores:
+            #     c = qctn.cores_weights[c_name]
+            #     is_tntensor = isinstance(c, TNTensor)
+
+            #     if isinstance(c, TNTensor):
+            #         c = c.tensor
+            #     if c.requires_grad:
+            #         if is_tntensor:
+            #             tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+            #         else:
+            #             tensor = core_tensors_args[offset]
+            #         offset += 1
+            #     else:
+            #         tensor = c
+                
+            #     cores_dict[c_name] = tensor
+            
+            # right_cores_dict = {}
+            # if right_qctn is not None and isinstance(right_qctn, QCTN):
+            #     for c_name in right_qctn.cores:
+            #         # print(f"right_qctn iter core: {c_name}")
+            #         c = right_qctn.cores_weights[c_name]
+            #         is_tntensor = isinstance(c, TNTensor)
+                    
+            #         if isinstance(c, TNTensor):
+            #             c = c.tensor
+            #         if c.requires_grad:
+            #             if is_tntensor:
+            #                 tensor = TNTensor(core_tensors_args[offset], core_scales[offset])
+            #             else:
+            #                 tensor = core_tensors_args[offset]
+            #             offset += 1
+            #         else:
+            #             tensor = c
+            #         right_cores_dict[c_name] = tensor
             
             # print(f'cores_dict keys: {list(cores_dict.keys())}')
+            # print(f'right_cores_dict keys: {list(right_cores_dict.keys())}')
             # print(f"core a tensor {cores_dict['a']}")
+            # print(f"right core a tensor {right_cores_dict['a']}")
             # print(f'right_cores_dict keys: {list(right_cores_dict.keys())}')
 
 
@@ -505,6 +532,11 @@ class EngineSiamese:
             # Avoid log(0)
             res_tensor = self.backend.clamp(res_tensor, min=1e-10)
             log_result = self.backend.log(res_tensor)
+
+            # MSE loss
+
+            loss = self.backend.mean((res_tensor - target) ** 2)
+            return loss
 
             # print(f"res_tensor : {res_tensor}, res_scale: {res_scale}")
             # print(f"log_result: {log_result.mean().item()}")
@@ -539,13 +571,13 @@ class EngineSiamese:
         
         # Compute gradients
         # We want gradients with respect to all cores
-        argnums = list(range(len(raw_core_tensors)))
+        argnums = list(range(len(trainable_cores)))
         
         # Create value_and_grad function
         value_and_grad_fn = self.backend.compute_value_and_grad(loss_fn, argnums=argnums)
         
         # Execute
-        loss, grads = value_and_grad_fn(*raw_core_tensors)
+        loss, grads = value_and_grad_fn(*trainable_cores)
 
         # print(f'input num {len(raw_core_tensors)} grad output num {len(grads)}')
         
@@ -559,7 +591,7 @@ class EngineSiamese:
         # print(f"Loss: {loss.item()}, Collected {[grad.mean().item() for grad in grads]} gradients.")
         # print(f"measure_input_list mean: {[m.mean().item() for m in measure_input_list]}")
 
-        return loss, grads
+        return loss, trainable_cores, grads
         
 
     # ============================================================================

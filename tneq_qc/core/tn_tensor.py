@@ -44,6 +44,18 @@ class TNTensor:
         else:
             self.log_scale = math.log(abs(self.scale)) if self.scale != 0 else float('-inf')
 
+    def set(self, tensor: Any, scale: Any = 1.0):
+        """
+        Set the tensor and scale to new values.
+        
+        Args:
+            tensor: The new backend tensor.
+            scale: The new scaling factor.
+        """
+        self._tensor = tensor
+        self.scale = float(scale)
+        self.log_scale = math.log(abs(self.scale)) if self.scale != 0 else float('-inf')
+
     @property
     def tensor(self) -> Any:
         """Get the underlying backend tensor."""
