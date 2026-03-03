@@ -1,3 +1,14 @@
+# python train.py \
+#   --num-step 5000 \
+#   --save-every 1000 \
+#   --eval-every 1000 \
+#   --num-eval-samples 4096 \
+#   --checkpoint-root ./checkpoints \
+#   --exp-name debug_w1_test
+
+# exit;
+
+
 #!/bin/bash
 # Run distributed training example with 4 processes using PyTorch CPU backend
 

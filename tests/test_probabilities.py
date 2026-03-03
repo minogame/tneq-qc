@@ -304,6 +304,43 @@ def test_sampling(qctn_cores_file="./assets/qctn_cores_3qubits_exp1.safetensors"
     print(f"Sampling finished in {t1-t0:.4f}s")
     print(f"Samples shape: {samples.shape}")
     print(f"First 5 samples:\n{samples[:5]}")
+
+    # ==========================================
+    # Compare with Random Reference Distributions using EMD/Wasserstein-1
+    # ==========================================
+    # 1) 生成与 samples 形状一致的高斯分布随机数据
+    #    N(0, 1) 的各向同性高斯
+    random_gaussian = torch.empty_like(samples).normal_(mean=0.0, std=1.0)
+
+    # 2) 可选：生成与采样范围一致的均匀分布数据（[-5, 5]），作为另一种参考分布
+    random_uniform = (torch.rand_like(samples) * 10.0) - 5.0
+
+    def wasserstein_1d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """
+        计算一维离散分布的 EMD / Wasserstein-1 距离。
+        假设 a, b 长度相同且权重均匀，则
+            W1 = mean(|sort(a) - sort(b)|)
+        """
+        a_sorted, _ = torch.sort(a)
+        b_sorted, _ = torch.sort(b)
+        return torch.mean(torch.abs(a_sorted - b_sorted))
+
+    # 对每一个维度分别计算 samples 与参考分布之间的 1D Wasserstein 距离
+    emd_gaussian_list = []
+    emd_uniform_list = []
+    for d in range(D):
+        emd_g = wasserstein_1d(samples[:, d], random_gaussian[:, d])
+        emd_u = wasserstein_1d(samples[:, d], random_uniform[:, d])
+        emd_gaussian_list.append(emd_g)
+        emd_uniform_list.append(emd_u)
+
+    emd_gaussian = torch.stack(emd_gaussian_list)  # (D,)
+    emd_uniform = torch.stack(emd_uniform_list)    # (D,)
+
+    print(f"Per-dimension Wasserstein-1 distance to Gaussian (N(0,1)): {emd_gaussian}")
+    print(f"Mean Wasserstein-1 distance to Gaussian: {emd_gaussian.mean()}")
+    print(f"Per-dimension Wasserstein-1 distance to Uniform[-5,5]: {emd_uniform}")
+    print(f"Mean Wasserstein-1 distance to Uniform[-5,5]: {emd_uniform.mean()}")
     
     # Plotting
     if samples.shape[1] >= 2 and output_file:
@@ -368,6 +405,12 @@ if __name__ == "__main__":
     # test_heatmap_marginal(qctn_cores_file="./assets/qctn_cores_5qubits_exp01.safetensors",
     #                       output_file = './assets/marginal_probability_heatmap_5qubits_exp01.png',
     #                       device='cpu')
+
+
+    test_sampling(qctn_cores_file="./assets/qctn_cores_17qubits_exp01.safetensors", 
+                    output_file="./assets/samples_scatter_17qubits_exp01.png",
+                    device='cpu')
+    
     test_sampling(qctn_cores_file="./assets/qctn_cores_129qubitsstd_exp01.safetensors", 
                     output_file="./assets/samples_scatter_129qubitsstd_exp01.png",
                     device='cpu')

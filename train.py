@@ -177,11 +177,18 @@ if __name__ == "__main__":
     # qctn_graph = QCTNHelper.generate_example_graph(n=17, graph_type="std", dim_char='3')
     # print(f"std qctn_graph: \n{qctn_graph}")
 
-    qctn_graph = QCTNHelper.generate_example_graph(n=2, graph_type=graph_type, dim_char='3')
+    qctn_graph = QCTNHelper.generate_example_graph(n=3, graph_type=graph_type, dim_char='3')
     # qctn_graph = QCTNHelper.generate_example_graph(n=17, graph_type=graph_type, dim_char='3')
     # qctn_graph = QCTNHelper.generate_example_graph(n=5, graph_type=graph_type, dim_char='3')
     # qctn_graph = QCTNHelper.generate_example_graph(n=5, graph_type=graph_type, dim_char='3')
     # qctn_graph = QCTNHelper.generate_example_graph(n=257, graph_type=graph_type, dim_char='3')
+    print(f"{graph_type} qctn_graph: \n{qctn_graph}")
+
+    qctn_graph = """
+-3-a-3-
+-3-a-3-
+-------
+    """
     print(f"{graph_type} qctn_graph: \n{qctn_graph}")
     
     
