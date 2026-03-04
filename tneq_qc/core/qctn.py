@@ -566,6 +566,9 @@ class QCTN:
         # Placeholders for einsum expressions
         self.einsum_expr = None
 
+        # Phase 2: submodule registry (nn.Module-style nesting)
+        self._submodules: dict = {}
+
     @classmethod
     def envolve_from_another_qctn(cls, qctn, strategies=None):
         """
@@ -1563,4 +1566,348 @@ class QCTN:
             QCTN: A new merged QCTN.
         """
         return QCTN.merge(self, other)
-    
+
+    # ================================================================
+    # Phase 2: nn.Module-style module management (R2)
+    # ================================================================
+
+    @classmethod
+    def from_graph(cls, graph_str: str, backend=None) -> "QCTN":
+        """Create a QCTN from an ASCII graph string.
+
+        Convenience classmethod that wraps the constructor.
+
+        Args:
+            graph_str: ASCII graph string defining the tensor network topology.
+            backend: Optional compute backend; if None the default backend is used.
+
+        Returns:
+            QCTN: New QCTN instance.
+        """
+        return cls(graph_str, backend=backend)
+
+    def register_module(self, name: str, module: "QCTN") -> None:
+        """Register *module* as a named sub-QCTN.
+
+        The sub-module's cores are accessible via ``named_cores()`` with the
+        prefix ``"<name>."`` prepended to each core name.
+
+        Args:
+            name: Attribute name under which the sub-module will be stored.
+            module: A QCTN instance to register.
+
+        Raises:
+            TypeError: If *module* is not a QCTN instance.
+            ValueError: If *name* is empty or contains a dot.
+        """
+        if not isinstance(module, QCTN):
+            raise TypeError(
+                f"register_module: expected a QCTN instance, got {type(module).__name__}"
+            )
+        if not name or "." in name:
+            raise ValueError(
+                f"register_module: name must be a non-empty string without dots, got {name!r}"
+            )
+        self._submodules[name] = module
+
+    def named_cores(self, prefix: str = ""):
+        """Iterate over ``(name, tensor)`` pairs for all core tensors.
+
+        Yields own cores first (in ``self.cores`` order), then recursively
+        yields sub-module cores with ``"<submodule_name>."`` prefixed.
+
+        Args:
+            prefix: String prepended to every yielded name (used internally
+                by recursive calls).
+
+        Yields:
+            tuple[str, Any]: ``(full_name, core_tensor)`` pairs.
+        """
+        for core_name in self.cores:
+            full_name = f"{prefix}{core_name}" if prefix else core_name
+            yield full_name, self.cores_weights[core_name]
+        for mod_name, sub in self._submodules.items():
+            sub_prefix = f"{prefix}{mod_name}." if prefix else f"{mod_name}."
+            yield from sub.named_cores(prefix=sub_prefix)
+
+    @property
+    def all_cores(self) -> dict:
+        """All core tensors including sub-modules, keyed by their full names.
+
+        Own cores use their bare names; sub-module cores use
+        ``"<submodule_name>.<core_name>"`` as keys.
+
+        Returns:
+            dict[str, Any]: Flat mapping of full core name → tensor.
+        """
+        return dict(self.named_cores())
+
+    # ================================================================
+    # Phase 2: Graph-parsing separation (R5) – einsum info & core list
+    # ================================================================
+
+    def get_einsum_info(
+        self,
+        circuit_states_shapes=None,
+        measure_shapes=None,
+        measure_is_matrix: bool = True,
+    ):
+        """Build the einsum equation and shape list for self-contraction.
+
+        Computes the ``A · Mx · A†`` einsum expression for this QCTN.
+        Extracted from ``EinsumStrategy.build_with_self_expression`` so that
+        the graph-parsing logic lives in the QCTN rather than the contractor.
+
+        Args:
+            circuit_states_shapes: Shape(s) of circuit input states.
+                * ``None``: no circuit states.
+                * ``tuple``: shape of a single state tensor.
+                * ``tuple of tuples``: shapes for a list of per-qubit state vectors.
+            measure_shapes: Shape(s) of measurement matrices.
+                * ``None``: no measurement.
+                * ``tuple``: shape of a single Mx matrix.
+                * ``tuple of tuples``: shapes for a list of per-qubit Mx matrices.
+            measure_is_matrix: Ignored (kept for API compatibility; always treated
+                as ``True`` internally – pass the outer-product matrix Mx).
+
+        Returns:
+            tuple[str, list]: ``(einsum_equation, tensor_shapes)`` where
+                *einsum_equation* is an opt_einsum-style string and
+                *tensor_shapes* is the list of shape tuples in contraction order.
+        """
+        import opt_einsum
+
+        is_states_list = (
+            isinstance(circuit_states_shapes, tuple)
+            and circuit_states_shapes
+            and isinstance(circuit_states_shapes[0], tuple)
+        )
+        is_measure_list = (
+            isinstance(measure_shapes, tuple)
+            and measure_shapes
+            and isinstance(measure_shapes[0], tuple)
+        )
+
+        cores_name = self.cores
+        symbol_id = 0
+
+        edge_symbol_map: dict = {}
+        input_symbols_stack: list = []
+        output_symbols_stack: list = []
+        new_symbol_mapping: dict = {}
+        equation_list: list = []
+
+        # ---- LEFT side cores ------------------------------------------------
+        for core_info in self.adjacency_table:
+            core_idx = core_info["core_idx"]
+            core_equation = ""
+
+            for edge in core_info["in_edge_list"]:
+                if edge["neighbor_idx"] == -1:
+                    symbol = opt_einsum.get_symbol(symbol_id)
+                    input_symbols_stack.append(symbol)
+                    symbol_id += 1
+                else:
+                    key = tuple(sorted([edge["neighbor_idx"], core_idx])) + (
+                        edge["qubit_idx"],
+                    )
+                    if key not in edge_symbol_map:
+                        edge_symbol_map[key] = opt_einsum.get_symbol(symbol_id)
+                        symbol_id += 1
+                    symbol = edge_symbol_map[key]
+                core_equation += symbol
+
+            for edge in core_info["out_edge_list"]:
+                if edge["neighbor_idx"] == -1:
+                    symbol = opt_einsum.get_symbol(symbol_id)
+                    output_symbols_stack.append(symbol)
+                    symbol_id += 1
+                else:
+                    key = tuple(sorted([core_idx, edge["neighbor_idx"]])) + (
+                        edge["qubit_idx"],
+                    )
+                    if key not in edge_symbol_map:
+                        edge_symbol_map[key] = opt_einsum.get_symbol(symbol_id)
+                        symbol_id += 1
+                    symbol = edge_symbol_map[key]
+                core_equation += symbol
+
+            equation_list.append(core_equation)
+
+        # ---- Middle (measurement) block ------------------------------------
+        middle_block_list: list = []
+        middle_symbols_mapping = {char: char for char in output_symbols_stack}
+        batch_symbol = ""
+        if measure_shapes is not None:
+            batch_symbol = opt_einsum.get_symbol(symbol_id)
+            symbol_id += 1
+            for char in output_symbols_stack:
+                symbol = opt_einsum.get_symbol(symbol_id)
+                symbol_id += 1
+                middle_symbols_mapping[char] = symbol
+                middle_block_list.append(batch_symbol + char + symbol)
+            if len(middle_block_list) >= 2:
+                middle_block_list = middle_block_list[:-2] + middle_block_list[-2:][::-1]
+
+        # ---- RIGHT side cores (conjugate / inverse) ------------------------
+        real_output_symbols_stack: list = []
+        inv_equation_list: list = []
+        for core_equation in equation_list[::-1]:
+            new_equation = ""
+            for char in core_equation:
+                if char in output_symbols_stack:
+                    new_equation += middle_symbols_mapping[char]
+                else:
+                    if char in new_symbol_mapping:
+                        symbol = new_symbol_mapping[char]
+                    else:
+                        symbol = opt_einsum.get_symbol(symbol_id)
+                        symbol_id += 1
+                        new_symbol_mapping[char] = symbol
+                        if char in input_symbols_stack:
+                            real_output_symbols_stack.append(symbol)
+                    new_equation += symbol
+            inv_equation_list.append(new_equation)
+
+        equation_list = equation_list + middle_block_list + inv_equation_list
+        einsum_equation_lefthand = ",".join(equation_list)
+
+        # ---- Circuit state symbols -----------------------------------------
+        if is_states_list:
+            circuit_states_symbols = ",".join(input_symbols_stack)
+            output_states_symbols = ""
+            for char in circuit_states_symbols[::-1]:
+                output_states_symbols += char if char == "," else new_symbol_mapping[char]
+        else:
+            circuit_states_symbols = "".join(input_symbols_stack)
+            output_states_symbols = "".join(
+                new_symbol_mapping[char] for char in circuit_states_symbols[::-1]
+            )
+
+        # ---- Assemble full LHS + RHS of equation ---------------------------
+        left_parts = []
+        if circuit_states_shapes is not None:
+            left_parts.append(circuit_states_symbols)
+        left_parts.append(einsum_equation_lefthand)
+        if circuit_states_shapes is not None:
+            left_parts.append(output_states_symbols)
+        einsum_equation_lefthand = ",".join(left_parts)
+        einsum_equation = f"{einsum_equation_lefthand}->{batch_symbol}"
+
+        # ---- Assemble shapes list ------------------------------------------
+        left_core_shapes = [
+            self.cores_weights[n].shape for n in cores_name
+        ]
+        right_core_shapes = [
+            self.cores_weights[n].shape for n in cores_name[::-1]
+        ]
+
+        shapes_list: list = []
+        if circuit_states_shapes is not None:
+            if is_states_list:
+                shapes_list.extend(list(circuit_states_shapes))
+            else:
+                shapes_list.append(circuit_states_shapes)
+        shapes_list.extend(left_core_shapes)
+        if measure_shapes is not None:
+            if is_measure_list:
+                shapes_list.extend(list(measure_shapes))
+            else:
+                shapes_list.append(measure_shapes)
+        shapes_list.extend(right_core_shapes)
+        if circuit_states_shapes is not None:
+            if is_states_list:
+                shapes_list.extend(list(circuit_states_shapes))
+            else:
+                shapes_list.append(circuit_states_shapes)
+
+        return einsum_equation, shapes_list
+
+    def build_core_list(
+        self,
+        cores_dict=None,
+        circuit_states=None,
+        measure_matrices=None,
+    ) -> list:
+        """Build the ordered tensor list for einsum contraction.
+
+        Returns tensors in the canonical order expected by the einsum
+        equation produced by :meth:`get_einsum_info`:
+
+            ``[circuit_states, left_cores, measure_matrices,
+               right_cores (reversed), circuit_states]``
+
+        Args:
+            cores_dict: Mapping of core name → tensor.  Defaults to
+                ``self.cores_weights`` when ``None``.
+            circuit_states: Single tensor or list of per-qubit state tensors.
+                Pass ``None`` to omit (no circuit input).
+            measure_matrices: Single matrix or list of per-qubit Mx matrices.
+                Pass ``None`` to omit (no measurement).
+
+        Returns:
+            list: Ordered tensor list for einsum execution.
+        """
+        if cores_dict is None:
+            cores_dict = self.cores_weights
+
+        tensors: list = []
+
+        if circuit_states is not None:
+            if isinstance(circuit_states, list):
+                tensors.extend(circuit_states)
+            else:
+                tensors.append(circuit_states)
+
+        for name in self.cores:
+            tensors.append(cores_dict[name])
+
+        if measure_matrices is not None:
+            if isinstance(measure_matrices, list):
+                tensors.extend(measure_matrices)
+            else:
+                tensors.append(measure_matrices)
+
+        for name in reversed(self.cores):
+            tensors.append(cores_dict[name])
+
+        if circuit_states is not None:
+            if isinstance(circuit_states, list):
+                # Right-side states are reversed to match the equation symbol order
+                # produced by get_einsum_info (output_states_symbols is the
+                # string-reversal of input_symbols_stack).
+                tensors.extend(reversed(circuit_states))
+            else:
+                tensors.append(circuit_states)
+
+        return tensors
+
+    # ================================================================
+    # Phase 2: Reference semantics for siamese networks (R2-引用语义)
+    # ================================================================
+
+    def conjugate_transpose_cores(self) -> dict:
+        """Return a dict of conj_transpose() references for all cores.
+
+        For each core in ``self.cores_weights``, returns a
+        :class:`~tneq_qc.core.tn_tensor.TNTensor` that is a zero-copy
+        conjugate-transpose view of the original (``is_ref=True``,
+        ``is_transposed=True``).
+
+        This is used to implement the siamese right-side sharing pattern:
+        the right-side core tensors in ``A · Mx · A†`` are derived from the
+        same underlying data as the left-side cores, so gradients propagate
+        correctly.
+
+        Returns:
+            dict[str, TNTensor]: ``{core_name: conj_transpose_view, ...}``
+        """
+        result: dict = {}
+        for name in self.cores:
+            tensor = self.cores_weights[name]
+            if isinstance(tensor, TNTensor):
+                result[name] = tensor.conj_transpose()
+            else:
+                result[name] = TNTensor(tensor).conj_transpose()
+        return result
+

@@ -24,65 +24,36 @@ class EinsumStrategy(ContractionStrategy):
     def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend) -> Callable:
         """
         Return computation function using opt_einsum.
-        
-        Use existing build_with_self_expression to generate einsum expression.
+
+        Delegates graph parsing to ``qctn.get_einsum_info()`` (R5) and
+        tensor assembly to ``qctn.build_core_list()`` (R5).
         """
-        # Get shape info
         circuit_states_shapes = shapes_info.get('circuit_states_shapes')
         measure_shapes = shapes_info.get('measure_shapes')
         measure_is_matrix = shapes_info.get('measure_is_matrix', True)
-        
-        # Generate einsum expression
-        einsum_eq, tensor_shapes = self.build_with_self_expression(
-            qctn, circuit_states_shapes, measure_shapes, measure_is_matrix
+
+        # R5: graph parsing now lives in QCTN
+        einsum_eq, tensor_shapes = qctn.get_einsum_info(
+            circuit_states_shapes, measure_shapes, measure_is_matrix
         )
-        
+
         # Create optimized expression
         expr = self.create_contract_expression(einsum_eq, tensor_shapes, optimize='auto')
-        
+
         def compute_fn(cores_dict, circuit_states, measure_matrices):
             """
             Compute using einsum expression.
-            
+
             Args:
                 cores_dict: {core_name: core_tensor} dictionary
                 circuit_states: List of circuit input states
                 measure_matrices: List of measurement matrices
-            
+
             Returns:
                 Contraction result
             """
-            # Prepare tensors in order
-            tensors = []
-            
-            # Add circuit_states
-            if circuit_states is not None:
-                if isinstance(circuit_states, list):
-                    tensors.extend(circuit_states)
-                else:
-                    tensors.append(circuit_states)
-            
-            # Add cores
-            for core_name in qctn.cores:
-                tensors.append(cores_dict[core_name])
-            
-            # Add measure_matrices
-            if measure_matrices is not None:
-                if isinstance(measure_matrices, list):
-                    tensors.extend(measure_matrices)
-                else:
-                    tensors.append(measure_matrices)
-            
-            # Add inverse cores
-            for core_name in reversed(qctn.cores):
-                tensors.append(cores_dict[core_name])
-            
-            # Add circuit_states again (conjugate side)
-            if circuit_states is not None:
-                if isinstance(circuit_states, list):
-                    tensors.extend(circuit_states)
-                else:
-                    tensors.append(circuit_states)
+            # R5: tensor ordering now delegated to QCTN.build_core_list()
+            tensors = qctn.build_core_list(cores_dict, circuit_states, measure_matrices)
 
             has_tntensor = False
             _tensors = []
@@ -106,7 +77,7 @@ class EinsumStrategy(ContractionStrategy):
                 result = TNTensor(result, scale=total_scale)
 
             return result
-        
+
         return compute_fn
     
     def estimate_cost(self, qctn, shapes_info: Dict[str, Any]) -> float:
@@ -416,7 +387,12 @@ class EinsumStrategy(ContractionStrategy):
         return einsum_equation, tensor_shapes
 
     @staticmethod
-    def build_with_self_expression(qctn, circuit_states_shape=None, measure_shape=None, measure_is_matrix=False) -> Tuple[str, List]:
+    def build_with_self_expression(qctn, circuit_states_shape=None, measure_shape=None, measure_is_matrix=True) -> Tuple[str, List]:
+        """Backward-compatible wrapper – delegates to ``qctn.get_einsum_info()``."""
+        return qctn.get_einsum_info(circuit_states_shape, measure_shape, measure_is_matrix)
+
+    @staticmethod
+    def _build_with_self_expression_legacy(qctn, circuit_states_shape=None, measure_shape=None, measure_is_matrix=False) -> Tuple[str, List]:
         """
         Build einsum expression for contracting QCTN with itself (hermitian conjugate).
         
