@@ -492,6 +492,7 @@ class BackendPyTorch(ComputeBackend):
 
     def reshape(self, tensor, shape):
         """Reshape tensor to the given shape."""
+        tensor = self.unwrap_tensor(tensor)
         return tensor.reshape(shape)
 
     def eye(self, n: int, dtype=None):
@@ -601,7 +602,8 @@ class BackendPyTorch(ComputeBackend):
 
     def einsum(self, equation, *operands):
         """Perform Einstein summation convention contraction."""
-        return self.torch.einsum(equation, *operands)
+        raw_ops = [self.unwrap_tensor(op) for op in operands]
+        return self.torch.einsum(equation, *raw_ops)
 
     def ones_like(self, tensor):
         """Create a tensor of ones with same shape and type as input."""

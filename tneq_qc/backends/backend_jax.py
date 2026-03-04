@@ -219,6 +219,7 @@ class BackendJAX(ComputeBackend):
 
     def reshape(self, tensor, shape):
         """Reshape tensor to the given shape."""
+        tensor = self.unwrap_tensor(tensor)
         return self.jnp.reshape(tensor, shape)
 
     def eye(self, n: int, dtype=None):
@@ -361,4 +362,5 @@ class BackendJAX(ComputeBackend):
 
     def einsum(self, equation, *operands):
         """Perform Einstein summation convention contraction."""
-        return self.jnp.einsum(equation, *operands)
+        raw_ops = [self.unwrap_tensor(op) for op in operands]
+        return self.jnp.einsum(equation, *raw_ops)

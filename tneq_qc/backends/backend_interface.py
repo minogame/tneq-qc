@@ -516,3 +516,63 @@ class ComputeBackend(ABC):
         Default: return tensor (no-op for real-only backends).
         """
         return tensor
+
+    # ------------------------------------------------------------------
+    # TNTensor-aware convenience wrappers (Phase-1)
+    #
+    # These non-abstract methods accept either raw tensors or TNTensors.
+    # When a TNTensor is passed, they unwrap it, call the backend op, and
+    # re-wrap the result in a new TNTensor (scale is preserved or propagated).
+    # ------------------------------------------------------------------
+
+    def tn_einsum(self, equation: str, *operands) -> "Any":
+        """Backend einsum that transparently handles TNTensor inputs.
+
+        If *any* operand is a TNTensor, the result is also a TNTensor whose
+        scale equals the product of all input scales.  Otherwise behaves
+        identically to :meth:`einsum`.
+        """
+        from ..core.tn_tensor import TNTensor
+        has_tn = any(isinstance(op, TNTensor) for op in operands)
+        if not has_tn:
+            return self.einsum(equation, *operands)
+
+        result_scale = 1.0
+        raw_ops = []
+        for op in operands:
+            if isinstance(op, TNTensor):
+                result_scale *= op.scale
+                raw_ops.append(op.tensor)
+            else:
+                raw_ops.append(op)
+
+        import math
+        raw_result = self.einsum(equation, *raw_ops)
+        return TNTensor(raw_result, scale=result_scale)
+
+    def tn_reshape(self, tensor, shape) -> "Any":
+        """Backend reshape that transparently handles TNTensor inputs.
+
+        Returns a TNTensor (with the same scale) when *tensor* is a TNTensor,
+        otherwise delegates to :meth:`reshape`.
+        """
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return tensor.reshape(shape)
+        return self.reshape(tensor, shape)
+
+    def tn_matmul(self, a, b) -> "Any":
+        """Matrix multiply that handles TNTensor inputs.
+
+        Scales are multiplied.  Falls back to ``a @ b`` for raw tensors.
+        """
+        from ..core.tn_tensor import TNTensor
+        if isinstance(a, TNTensor) and isinstance(b, TNTensor):
+            return a @ b
+        if isinstance(a, TNTensor):
+            raw_result = self.einsum("...ij,...jk->...ik", a.tensor, b) if False else a.tensor @ b
+            return TNTensor(raw_result, scale=a.scale)
+        if isinstance(b, TNTensor):
+            raw_result = a @ b.tensor
+            return TNTensor(raw_result, scale=b.scale)
+        return a @ b
