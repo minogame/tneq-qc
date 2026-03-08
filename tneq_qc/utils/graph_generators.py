@@ -328,6 +328,85 @@ class QCTNHelper:
         return graph.strip()
 
     @staticmethod
+    def mps(nqubits, bond_dim, phys_dim=2):
+        """Generate a uniform MPS graph where all qubits see all cores in a chain.
+
+        Each qubit line passes through every core, with ``bond_dim`` connecting
+        adjacent cores and ``phys_dim`` as the left/right boundary dimension.
+
+        Example — ``mps(3, bond_dim=4, phys_dim=2)``::
+
+            -2-A-4-B-4-C-2-
+            -2-A-4-B-4-C-2-
+            -2-A-4-B-4-C-2-
+
+        Args:
+            nqubits: Number of qubits (rows in the graph).
+            bond_dim: Bond dimension between adjacent cores.
+            phys_dim: Physical (input/output boundary) dimension.
+
+        Returns:
+            str: Graph string suitable for ``QCTN`` construction.
+        """
+        import opt_einsum
+        char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
+        p, b = str(phys_dim), str(bond_dim)
+        inner = f'-{b}-'.join(char_list)
+        line = f'-{p}-{inner}-{p}-'
+        return '\n'.join([line] * nqubits)
+
+    @staticmethod
+    def circuit_state(nqubits, phys_dim=2):
+        """Generate a circuit-state graph: each qubit has one core, no left input dim.
+
+        Each qubit line has a single core with only a right (output) edge of
+        ``phys_dim``.  This corresponds to a vector (ket) state.
+
+        Example — ``circuit_state(3, phys_dim=2)``::
+
+            -A-2-
+            -B-2-
+            -C-2-
+
+        Args:
+            nqubits: Number of qubits (one core per qubit).
+            phys_dim: Physical (output) dimension.
+
+        Returns:
+            str: Graph string suitable for ``QCTN`` construction.
+        """
+        import opt_einsum
+        char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
+        p = str(phys_dim)
+        return '\n'.join(f'-{c}-{p}-' for c in char_list)
+
+    @staticmethod
+    def measure_matrix(nqubits, phys_dim=2):
+        """Generate a measurement-matrix graph: each qubit has one core with in/out dims.
+
+        Each qubit line has a single core with one input edge and one output
+        edge, both of dimension ``phys_dim``.  This corresponds to a matrix
+        operator (e.g. an observable).
+
+        Example — ``measure_matrix(3, phys_dim=2)``::
+
+            -2-A-2-
+            -2-B-2-
+            -2-C-2-
+
+        Args:
+            nqubits: Number of qubits (one core per qubit).
+            phys_dim: Physical (input and output) dimension.
+
+        Returns:
+            str: Graph string suitable for ``QCTN`` construction.
+        """
+        import opt_einsum
+        char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
+        p = str(phys_dim)
+        return '\n'.join(f'-{p}-{c}-{p}-' for c in char_list)
+
+    @staticmethod
     def triu_ndindex(n):
         """Generate indices for the upper triangular part of a square matrix."""
         for i in range(n):

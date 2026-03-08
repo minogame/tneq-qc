@@ -95,6 +95,7 @@ result = tn_a @ tn_b                                  # 等价
 - 不支持嵌套（QCTN 包含 QCTN）
 - Circuit、Mx 测量矩阵与 QCTN 分开管理，不统一
 - 邻接矩阵维护繁琐，拆分/合并不完善
+- Core tensor 的声明与初始化耦合在 `__init__` 中，无法延迟初始化或从外部注入
 
 ### 新设计
 
@@ -133,45 +134,48 @@ class QCTN:
 
 #### 3.2 具体实现说明
 
-**基础 QCTN**（从 graph 字符串初始化，保持现有功能）：
+**core tensor 声明与初始化分离**：`__init__` 只解析图、不初始化权重；`auto_init()` 执行随机正交初始化；`set_cores()` 接受外部传入。
 
 ```python
-class BasicQCTN(QCTN):
-    def __init__(self, graph_str: str, bond_dims=None):
-        super().__init__()
-        self._graph = TNGraph(graph_str)      # 构建邻接表（不再用邻接矩阵）
-        self._init_cores()                    # 正交初始化 core tensors
+class QCTN:
+    def __init__(self, graph, backend=None):
+        # 解析图，构建 adjacency_table，不初始化 cores_weights
+        self.cores_weights = {}
 
-    def define(self):
-        return self._graph                    # 返回图结构
+    def auto_init(self, dtype=None, device=None) -> 'QCTN':
+        """随机正交初始化所有 core tensors，返回 self 支持链式调用。"""
+        ...
+
+    def set_cores(self, cores, strict=True):
+        """从外部 list/dict 注入 core tensors。"""
+        ...
 ```
 
-**嵌套 QCTN 示例**：
+**小模块**（放 `tneq_qc/modules/small.py`）：
 
 ```python
-class MyModel(QCTN):
-    def __init__(self):
-        super().__init__()
-        self.left = BasicQCTN("-2-A-4-B-2-")
-        self.right = BasicQCTN("-2-C-4-D-2-")
+class MPS(QCTN):
+    """矩阵乘积态，由 QCTNHelper.mps() 生成图字符串。"""
+    def __init__(self, nqubits, bond_dim, phys_dim=2, backend=None): ...
 
-    def define(self):
-        return concat(self.left, self.right)  # 拼接两个 QCTN
-
-    def forward(self, x):
-        return self.contract(x)
-```
-
-**Circuit 和 Mx 用 QCTN 表示**：
-
-```python
 class CircuitState(QCTN):
-    """线路态，每个 qubit 一个向量"""
-    ...
+    """线路态：无左输入维，每 qubit 一个 core，右侧输出 phys_dim。"""
+    def __init__(self, nqubits, phys_dim=2, backend=None): ...
 
-class MeasurementMatrix(QCTN):
-    """测量矩阵 Mx"""
-    ...
+class MeasureMatrix(QCTN):
+    """测量矩阵：每 qubit 一个 core，左右各一个 phys_dim。"""
+    def __init__(self, nqubits, phys_dim=2, backend=None): ...
+```
+
+**应用模块**（放 `tneq_qc/modules/app.py`），通过 `register_module` 组合小模块：
+
+```python
+class PlainMPS(QCTN):     # 普通 MPS 作为完整应用
+class TransposeMPS(QCTN): # MPS 转置（core 共享引用，is_transposed=True）
+class MPS_with_Ref(QCTN): # MPS + 引用副本（孪生/对称网络）
+class Encoding(QCTN):     # CircuitState + MPS
+class TNEQ(QCTN):         # MPS_1 + MPS_2（两个独立 MPS 的内积）
+class Quadratic(QCTN):    # circuit + mps + mx + mps† + circuit†
 ```
 
 #### 3.3 core tensor 引用语义（依赖 R1）
@@ -182,25 +186,30 @@ right_core = left_core.conj().transpose()   # is_ref=True, is_transposed=True
 # 修改 left_core 的参数，right_core 自动感知（因为共享底层张量）
 ```
 
-#### 3.4 split / merge 保留
+#### 3.4 chunk / concat（原 split / merge）
 
-- `split(qctn, at_bond)` → 返回两个 QCTN（保留现有逻辑）
-- `merge(qctn_a, qctn_b)` → 合并为一个 QCTN
+- `chunk(split_idx)` → 返回两个 QCTN（原 `split`，已重命名）
+- `concat(qctn_a, qctn_b)` → 合并为一个 QCTN（原 `merge`，已重命名）
+- 旧方法 `split` / `merge` / `merge_with` 保留并加 `DeprecationWarning`，重定向到新方法
 
-#### 3.5 Contractor 图解析移入 QCTN
+#### 3.5 Contractor 图解析移入 QCTN（Phase 2 已完成）
 
-按重构.md 第 6 条：**图解析**（遍历 graph，处理 core tensor 的复制/转置/边关系，生成 `core_tensor_list`）从 contractor 移到 QCTN 的方法中：
+图解析已移入 QCTN 方法；Contractor 调用这些方法而非内嵌图解析逻辑：
 
 ```python
 class QCTN:
-    def build_core_list(self, circuit_states, measure_matrices) -> List[TNTensor]:
-        """根据当前结构，生成用于收缩的 tensor 列表（含 circuit_states 和 Mx）"""
-        ...
+    def build_core_list(self, cores_dict, circuit_states, measure_matrices) -> list:
+        """生成用于 einsum 收缩的有序张量列表。"""
 
-    def get_einsum_info(self) -> Tuple[str, List]:
-        """返回 einsum 方程和形状信息（供 Contractor 使用）"""
-        ...
+    def get_einsum_info(self, ...) -> tuple:
+        """返回 einsum 方程和形状信息（供 EinsumStrategy 使用）。"""
+
+    def build_symmetric_expansion_graph(self, ...) -> tuple:
+        """构建 L-M-R 对称展开图（供 RowPriorityStrategy 使用）。"""
 ```
+
+> `circuit_states` / `measure_matrices` 作为收缩时注入的数据参数保留，不删除。
+> `self.circuit_states` / `self.measure_matrices` 实例属性已废弃删除（Phase 2.6）。
 
 ---
 
@@ -349,7 +358,8 @@ Layer 3: 计算（Engine）
 | `test_tn_tensor.py` | TNTensor 所有方法（scale、引用语义、运算）| 待实现 |
 | `test_tn_graph.py` | TNGraph 解析、to_string、节点操作 | 已有，需补充 |
 | `test_backends.py` | 各 backend 方法一致性测试 | 已有部分 |
-| `test_qctn_basic.py` | QCTN 初始化、from_graph、cores 访问 | 待实现 |
+| `test_qctn_basic.py` | QCTN 初始化、from_graph、cores 访问 | 已有 |
+| `test_qctn_modules.py` | 小模块/应用模块初始化、组合、chunk/concat、contract（默认 complex64+torch+cpu）| 待实现 |
 | `test_loss.py` | 各 Loss 的数值正确性 | 待实现 |
 | `test_optimizer.py` | Optimizer 单步更新、lr_schedule | 待实现 |
 
@@ -359,7 +369,7 @@ Layer 3: 计算（Engine）
 |---|---|---|
 | `test_engine_contract.py` | Engine + Strategy + Backend 端到端收缩 | 已有部分 |
 | `test_trainer.py` | Trainer 完整训练循环（toy dataset）| 待实现 |
-| `test_qctn_nested.py` | 嵌套 QCTN 的 forward | 待实现 |
+| `test_qctn_nested.py` | 嵌套 QCTN 的 forward | 合并入 test_qctn_modules.py |
 | `test_greedy_strategy.py` | GreedyStrategy 结果与 Einsum 一致性 | 已有 |
 
 #### 系统测试（System Tests）
@@ -386,12 +396,21 @@ Layer 3: 计算（Engine）
 2. **R1-运算**：实现 `__matmul__`、`__mul__`、`sum`、`mean`，确保 scale 正确传播
 3. 更新 `backend_interface.py`：`einsum`、`reshape` 等方法支持 `TNTensor` 输入/输出
 
-### Phase 2：QCTN 重构
+### Phase 2：QCTN 重构（已完成）
 
-4. **R2-基类**：实现 `QCTN` 基类（`__init__`、`cores()`、`named_cores()`、`from_graph()`）
-5. **R2-图解析分离（R5）**：将 `build_core_list`、`get_einsum_info` 作为 QCTN 方法，从 contractor 中解耦
-6. **R2-嵌套支持**：实现 `_submodules` 注册、`concat` 结构定义函数
-7. **R2-引用语义**：利用 R1 的 TNTensor 引用实现孪生网络 right 侧共享参数
+4. **R2-基类**：实现 `QCTN` 基类（`__init__`、`cores()`、`named_cores()`、`from_graph()`）✓
+5. **R2-图解析分离（R5）**：`build_core_list`、`get_einsum_info`、`build_symmetric_expansion_graph` 移入 QCTN ✓
+6. **R2-嵌套支持**：`_submodules` 注册（`register_module` / `named_cores`）✓
+7. **R2-引用语义**：利用 R1 的 TNTensor 引用实现孪生网络 right 侧共享参数（Phase 2.6 实现）
+
+### Phase 2.6：QCTN 模块化与小/应用模块体系
+
+8. **core 声明/初始化分离**：`__init__` 不再调用 `_init_cores`；新增 `auto_init()` 方法
+9. **小模块**：实现 `MPS`、`CircuitState`、`MeasureMatrix`（`tneq_qc/modules/small.py`）
+10. **chunk/concat**：`split` → `chunk`，`merge` → `concat`（旧接口加 DeprecationWarning）
+11. **删除遗留属性**：移除 `self.circuit_states` / `self.measure_matrices` 实例属性
+12. **应用模块**：实现 `PlainMPS`、`TransposeMPS`、`MPS_with_Ref`、`Encoding`、`TNEQ`、`Quadratic`（`tneq_qc/modules/app.py`）
+13. **测试**：新增 `tests/test_qctn_modules.py`，更新现有测试适配 `auto_init()`
 
 ### Phase 3：训练流程重构
 
@@ -408,9 +427,11 @@ Layer 3: 计算（Engine）
 
 ## 九、向后兼容策略
 
-- `QCTN` 基类新增，原有 `QCTN`（`qctn.py`）改名为 `BasicQCTN` 或保留并作为 `QCTN` 子类
+- `QCTN` 保留原名，`from_graph()` 作为 classmethod 已实现；不再新增 `BasicQCTN` 子类
+- `QCTN(graph)` 初始化后 `cores_weights` 为空，需调用 `.auto_init()` 或 `set_cores()`；现有代码统一更新
+- `split` / `merge` / `merge_with` 保留并加 `DeprecationWarning`，重定向至 `chunk` / `concat` / `concat_with`
 - `Optimizer.optimize()` 保留但标记为 deprecated，新逻辑通过 `Trainer` 暴露
-- contractor 层的 `get_compute_function` 签名不变，内部改为调用 `qctn.build_core_list`
+- contractor 层的 `get_compute_function` 签名不变，内部调用 `qctn.build_core_list`
 - 所有现有 test 保证在重构后继续通过
 
 ---

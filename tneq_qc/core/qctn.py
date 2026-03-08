@@ -42,14 +42,38 @@ class QCTN:
  
     """
 
-    def __init__(self, graph, backend=None):
+    def __init__(self, graph=None, backend=None, *, _defer_init=False):
         """
         Initialize the QCTN with a quantum circuit graph.
-        
+
         Args:
-            graph (str): A string representation of the quantum circuit graph.
+            graph (str | None): ASCII graph string defining the tensor network
+                topology.  Pass ``None`` to create a composite module with no
+                own core tensors (submodules are registered via
+                ``register_module``).
             backend (ComputeBackend): The backend to use for computation.
+            _defer_init (bool): If ``True``, skip automatic core-tensor
+                initialization.  Subclasses that want deferred initialization
+                (e.g. ``MPS``, ``CircuitState``) should pass
+                ``_defer_init=True`` and call :meth:`auto_init` explicitly.
         """
+        # ---- composite mode (no graph) ----
+        if graph is None:
+            self.qubits = []
+            self.nqubits = 0
+            self.qubit_indices = []
+            self.graph = None
+            self.tn_graph = None
+            self.cores = []
+            self.ncores = 0
+            self.adjacency_table = []
+            self.backend = backend
+            self._loaded_metadata = None
+            self.cores_weights = {}
+            self._submodules: dict = {}
+            return
+
+        # ---- graph-based mode ----
         self.qubits = graph.strip().splitlines()
         self.nqubits = len(self.qubits)
         self.qubit_indices = list(range(self.nqubits))
@@ -74,13 +98,9 @@ class QCTN:
         self.backend = backend
         self._loaded_metadata: Optional[Mapping[str, str]] = None
 
-        # Initialize the cores with random values
         self.cores_weights = {}
-        self._init_cores()
-
-        # Circuit states and measure matrices — part of the tensor network
-        self.circuit_states = None   # list or dict of per-qubit circuit state tensors
-        self.measure_matrices = None # list or dict of per-qubit measure matrices
+        if not _defer_init and backend is not None:
+            self._init_cores()
 
         # Phase 2: submodule registry (nn.Module-style nesting)
         self._submodules: dict = {}
@@ -279,17 +299,26 @@ class QCTN:
             
             # print(f"_init_cores: {idx} {input_shape} {output_shape} {input_dim} {output_dim}")
 
-            # Initialize core with shape [input_dim, output_dim]
-            core = self.backend.init_random_core([input_dim, output_dim])
-            
-            # Reshape to input_shape + output_shape
             full_shape = input_shape + output_shape
-            core = self.backend.reshape(core, full_shape)
+
+            if input_dim == output_dim:
+                # Square case: use orthogonal (QR) initialization
+                core = self.backend.init_random_core([input_dim, output_dim])
+                core = self.backend.reshape(core, full_shape)
+            else:
+                # Non-square case: orthogonal init is not applicable;
+                # fall back to random Gaussian (normalized by sqrt of max dim).
+                max_dim = max(input_dim, output_dim)
+                core = self.backend.init_random_core([max_dim, max_dim])
+                # Slice to [input_dim, output_dim] then reshape
+                raw = core.tensor if isinstance(core, TNTensor) else core
+                raw_sliced = raw[:input_dim, :output_dim].contiguous()
+                core = self.backend.reshape(
+                    self.backend.wrap_tensor(raw_sliced) if isinstance(core, TNTensor) else raw_sliced,
+                    full_shape,
+                )
 
             self.cores_weights[core_name] = core
-            # self.cores_weights[core_name] = TNTensor(core)
-            # self.cores_weights[core_name] = core
-            # self.cores_weights[core_name].auto_scale()
 
     def set_cores(self, cores, strict: bool = True):
         """
@@ -595,12 +624,38 @@ class QCTN:
         return new_lines
 
     # ================================================================
-    # Split / Merge operations
+    # Core tensor initialization
     # ================================================================
 
-    def split(self, split_idx=None):
+    def auto_init(self, dtype=None, device=None) -> "QCTN":
+        """Initialize (or re-initialize) all core tensors with random orthogonal values.
+
+        For graph-based modules, calls :meth:`_init_cores` to populate
+        ``cores_weights``.  For composite modules (``graph=None``), recursively
+        calls ``auto_init`` on every registered submodule.
+
+        Args:
+            dtype: Optional dtype hint forwarded to submodule ``auto_init``
+                calls.  Not yet used by :meth:`_init_cores` directly; reserved
+                for future backend-level dtype control.
+            device: Optional device hint forwarded to submodule ``auto_init``
+                calls.
+
+        Returns:
+            self — supports chaining, e.g. ``MPS(3, 4).auto_init()``.
         """
-        Split the QCTN into two QCTNs by core tensor index.
+        if self.graph is not None:
+            self._init_cores()
+        for sub in self._submodules.values():
+            sub.auto_init(dtype=dtype, device=device)
+        return self
+
+    # ================================================================
+    # Chunk / Concat operations  (renamed from Split / Merge)
+    # ================================================================
+
+    def chunk(self, split_idx=None):
+        """Split the QCTN into two QCTNs by core tensor index.
 
         Cores are divided into two groups:
 
@@ -659,7 +714,7 @@ class QCTN:
 
                 if last_g1 >= first_g2:
                     raise ValueError(
-                        f"Cannot split: cores from both groups are "
+                        f"Cannot chunk: cores from both groups are "
                         f"interleaved on qubit {qubit_idx}. Ensure that "
                         f"all Group-1 cores appear before Group-2 cores "
                         f"on every qubit line."
@@ -676,16 +731,15 @@ class QCTN:
                 lines_group1.append(QCTN._rebuild_qubit_line(tokens))
             elif g2_pos:
                 lines_group2.append(QCTN._rebuild_qubit_line(tokens))
-            # else: qubit has no cores — skip (shouldn't happen)
 
         if not lines_group1:
             raise ValueError(
-                "After split, Group 1 has no qubit lines. "
+                "After chunk, Group 1 has no qubit lines. "
                 "All qubits belong to Group 2."
             )
         if not lines_group2:
             raise ValueError(
-                "After split, Group 2 has no qubit lines. "
+                "After chunk, Group 2 has no qubit lines. "
                 "All qubits belong to Group 1."
             )
 
@@ -695,7 +749,7 @@ class QCTN:
         qctn1 = QCTN(graph1, backend=self.backend)
         qctn2 = QCTN(graph2, backend=self.backend)
 
-        # Copy core weights (shapes are unchanged by the split)
+        # Copy core weights (shapes are unchanged by the chunk)
         for core_name in self.cores[:split_idx]:
             if core_name in self.cores_weights:
                 qctn1.cores_weights[core_name] = self.cores_weights[core_name]
@@ -705,10 +759,18 @@ class QCTN:
 
         return qctn1, qctn2
 
+    def split(self, split_idx=None):
+        """.. deprecated:: Use :meth:`chunk` instead."""
+        warnings.warn(
+            "QCTN.split() is deprecated, use QCTN.chunk() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.chunk(split_idx)
+
     @staticmethod
-    def merge(qctn1, qctn2):
-        """
-        Left-right merge of two QCTNs into a single new QCTN (static method).
+    def concat(qctn1, qctn2):
+        """Left-right merge of two QCTNs into a single new QCTN (static method).
 
         The merged QCTN places *qctn1*'s graph on the left and *qctn2*'s
         graph on the right, concatenating each qubit line horizontally.
@@ -732,6 +794,11 @@ class QCTN:
         Returns:
             QCTN: A new merged QCTN with renamed cores and copied weights.
         """
+        return QCTN._concat_impl(qctn1, qctn2)
+
+    @staticmethod
+    def _concat_impl(qctn1, qctn2):
+        """Internal implementation shared by concat() and merge()."""
         import opt_einsum
 
         n1, n2 = qctn1.nqubits, qctn2.nqubits
@@ -810,11 +877,20 @@ class QCTN:
 
         return new_qctn
 
-    def merge_with(self, other):
-        """
-        Merge *self* with another QCTN and return a new QCTN.
+    @staticmethod
+    def merge(qctn1, qctn2):
+        """.. deprecated:: Use :meth:`concat` instead."""
+        warnings.warn(
+            "QCTN.merge() is deprecated, use QCTN.concat() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return QCTN.concat(qctn1, qctn2)
 
-        Equivalent to ``QCTN.merge(self, other)``.  The result has
+    def concat_with(self, other):
+        """Merge *self* with *other* and return a new QCTN.
+
+        Equivalent to ``QCTN.concat(self, other)``.  The result has
         *self*'s cores first (preserving relative order), followed by
         *other*'s cores, with all core names reassigned contiguously.
 
@@ -824,7 +900,16 @@ class QCTN:
         Returns:
             QCTN: A new merged QCTN.
         """
-        return QCTN.merge(self, other)
+        return QCTN.concat(self, other)
+
+    def merge_with(self, other):
+        """.. deprecated:: Use :meth:`concat_with` instead."""
+        warnings.warn(
+            "QCTN.merge_with() is deprecated, use QCTN.concat_with() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.concat_with(other)
 
     # ================================================================
     # nn.Module-style interface
@@ -1189,18 +1274,20 @@ class QCTN:
         assigned.  This is the graph-structure counterpart of
         :meth:`get_einsum_info` (which serves EinsumStrategy).
 
-        When ``self.circuit_states`` / ``self.measure_matrices`` are set and
-        shape parameters are not provided, shapes are auto-derived.  Actual
-        tensors are embedded into each entry's ``'tensor'`` key so that
-        downstream contraction code only needs ``entry['tensor']``.
+        Actual tensors are embedded into each entry's ``'tensor'`` key
+        (for core and transpose sources) so that downstream contraction code
+        only needs ``entry['tensor']``.  For ``'circuit'`` and ``'mx'``
+        sources, tensors are embedded only when ``self.circuit_states`` /
+        ``self.measure_matrices`` are set as instance attributes (legacy
+        pattern); pass shapes explicitly for pure graph-structure queries.
 
         Args:
             circuit_states_shapes: Per-qubit circuit-state shapes.
-                * ``None`` — auto-derive from ``self.circuit_states`` if set.
+                * ``None`` — no circuit states (omit circuit entries).
                 * ``list[tuple]`` — ``circuit_states_shapes[qubit_idx]`` is the
                   shape of that qubit's state vector, e.g. ``[(3,), (3,)]``.
             measure_shapes: Per-qubit measurement-matrix shapes.
-                * ``None`` — auto-derive from ``self.measure_matrices`` if set.
+                * ``None`` — no measurement matrices (omit Mx entries).
                 * ``list[tuple|None]`` — ``measure_shapes[qubit_idx]`` is the
                   shape of Mx, e.g. ``[(10, 3, 3), ...]``.  ``None`` entries
                   mean "no measure on this qubit".
@@ -1218,9 +1305,12 @@ class QCTN:
         """
         import opt_einsum
 
-        # Auto-derive shapes from self when not explicitly provided
-        if circuit_states_shapes is None and self.circuit_states is not None:
-            cs = self.circuit_states
+        # Auto-derive shapes from dynamic instance attributes when not provided
+        # (legacy pattern: qctn.circuit_states = [...]; qctn.measure_matrices = [...])
+        _cs_attr = getattr(self, 'circuit_states', None)
+        _mx_attr = getattr(self, 'measure_matrices', None)
+        if circuit_states_shapes is None and _cs_attr is not None:
+            cs = _cs_attr
             if isinstance(cs, dict):
                 circuit_states_shapes = [
                     cs[i].shape if i in cs else None for i in range(self.nqubits)
@@ -1230,9 +1320,8 @@ class QCTN:
                     cs[i].shape if i < len(cs) and cs[i] is not None else None
                     for i in range(self.nqubits)
                 ]
-
-        if measure_shapes is None and self.measure_matrices is not None:
-            mx = self.measure_matrices
+        if measure_shapes is None and _mx_attr is not None:
+            mx = _mx_attr
             if isinstance(mx, dict):
                 measure_shapes = [
                     mx[i].shape if i in mx else None for i in range(self.nqubits)
@@ -1545,11 +1634,13 @@ class QCTN:
                 else:
                     entry['tensor'] = t
             elif source == 'circuit':
-                if self.circuit_states is not None:
-                    entry['tensor'] = self.circuit_states[key]
+                _cs = getattr(self, 'circuit_states', None)
+                if _cs is not None:
+                    entry['tensor'] = _cs[key]
             elif source == 'mx':
-                if self.measure_matrices is not None:
-                    entry['tensor'] = self.measure_matrices[key]
+                _mx = getattr(self, 'measure_matrices', None)
+                if _mx is not None:
+                    entry['tensor'] = _mx[key]
 
         maps = {
             'left_core_map': left_core_map,
