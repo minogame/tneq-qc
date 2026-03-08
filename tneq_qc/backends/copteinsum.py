@@ -16,10 +16,41 @@ def local_print(*args, **kwargs):
     if local_debug:
         print(*args, **kwargs)
 
+def _build_circuit_from_adjacency_table(qctn):
+    """Build (input_ranks, adjacency_matrix, output_ranks) from qctn.adjacency_table.
+
+    This is a compatibility shim so that legacy ContractorOptEinsum methods can
+    work without the removed ``qctn.adjacency_matrix`` / ``qctn.circuit`` attrs.
+    """
+    import numpy as np
+    ncores = qctn.ncores
+    adjacency_table = qctn.adjacency_table
+
+    adjacency_matrix = np.empty((ncores, ncores), dtype=object)
+    for i in range(ncores):
+        for j in range(ncores):
+            adjacency_matrix[i, j] = []
+
+    for core_info in adjacency_table:
+        core_idx = core_info['core_idx']
+        for edge in core_info['out_edge_list']:
+            if edge['neighbor_idx'] >= 0:
+                adjacency_matrix[core_idx, edge['neighbor_idx']].append(edge['edge_rank'])
+                adjacency_matrix[edge['neighbor_idx'], core_idx].append(edge['edge_rank'])
+
+    input_ranks = np.empty(ncores, dtype=object)
+    output_ranks = np.empty(ncores, dtype=object)
+    for i in range(ncores):
+        input_ranks[i] = adjacency_table[i]['input_shape'].copy()
+        output_ranks[i] = adjacency_table[i]['output_shape'].copy()
+
+    return input_ranks, adjacency_matrix, output_ranks
+
+
 class ContractorOptEinsum:
     """
     ContractorOptEinsum class for optimized tensor contraction using opt_einsum.
-    
+
     This class provides methods to contract tensors using the opt_einsum library,
     which is optimized for performance and memory efficiency.
     """
@@ -37,7 +68,7 @@ class ContractorOptEinsum:
             jnp.ndarray: The result of the tensor contraction.
         """
 
-        input_ranks, adjacency_matrix, output_ranks = qctn.circuit
+        input_ranks, adjacency_matrix, output_ranks = _build_circuit_from_adjacency_table(qctn)
         cores_name = qctn.cores
         cores_weights = qctn.cores_weights
 
@@ -47,7 +78,7 @@ class ContractorOptEinsum:
 
         adjacency_matrix_for_interaction = adjacency_matrix.copy()
 
-        from ..core.qctn import QCTNHelper
+        from ..utils.graph_generators import QCTNHelper
         for element in QCTNHelper.triu_ndindex(len(cores_name)):
             i, j = element
             if adjacency_matrix_for_interaction[i, j]:
@@ -81,7 +112,7 @@ class ContractorOptEinsum:
         for core_name in cores_name:
             local_print(f'Core: {core_name}, Shape: {cores_weights[core_name].shape}')
         
-        local_print(f'QCTN: {qctn.circuit}')
+        local_print(f'QCTN cores: {qctn.cores}')
         local_print(f'Einsum Equation: {einsum_equation}')
         local_print(f'Tensor Shapes: {tensor_shapes}')
 
@@ -106,7 +137,7 @@ class ContractorOptEinsum:
 
         local_print(f'ContractorOptEinsum.contract_with_inputs called with inputs shape: {inputs.shape}')
 
-        input_ranks, adjacency_matrix, output_ranks = qctn.circuit
+        input_ranks, adjacency_matrix, output_ranks = _build_circuit_from_adjacency_table(qctn)
         cores_name = qctn.cores
         cores_weights = qctn.cores_weights
 
@@ -122,7 +153,7 @@ class ContractorOptEinsum:
 
         adjacency_matrix_for_interaction = adjacency_matrix.copy()
 
-        from ..core.qctn import QCTNHelper
+        from ..utils.graph_generators import QCTNHelper
         for element in QCTNHelper.triu_ndindex(len(cores_name)):
             i, j = element
             if adjacency_matrix_for_interaction[i, j]:
@@ -159,7 +190,7 @@ class ContractorOptEinsum:
         for core_name in cores_name:
             local_print(f'Core: {core_name}, Shape: {cores_weights[core_name].shape}')
         
-        local_print(f'QCTN: {qctn.circuit}')
+        local_print(f'QCTN cores: {qctn.cores}')
         local_print(f'Einsum Equation: {einsum_equation}')
         local_print(f'Tensor Shapes: {tensor_shapes}')
 
@@ -184,7 +215,7 @@ class ContractorOptEinsum:
             jnp.ndarray: The result of the tensor contraction.
         """
 
-        input_ranks, adjacency_matrix, output_ranks = qctn.circuit
+        input_ranks, adjacency_matrix, output_ranks = _build_circuit_from_adjacency_table(qctn)
         cores_name = qctn.cores
         cores_weights = qctn.cores_weights
 
@@ -194,7 +225,7 @@ class ContractorOptEinsum:
 
         adjacency_matrix_for_interaction = adjacency_matrix.copy()
 
-        from ..core.qctn import QCTNHelper
+        from ..utils.graph_generators import QCTNHelper
         for element in QCTNHelper.triu_ndindex(len(cores_name)):
             i, j = element
             if adjacency_matrix_for_interaction[i, j]:
@@ -231,7 +262,7 @@ class ContractorOptEinsum:
         for core_name in cores_name:
             local_print(f'Core: {core_name}, Shape: {cores_weights[core_name].shape}')
         
-        local_print(f'QCTN: {qctn.circuit}')
+        local_print(f'QCTN cores: {qctn.cores}')
         local_print(f'Einsum Equation: {einsum_equation}')
         local_print(f'Tensor Shapes: {tensor_shapes}')
 
@@ -258,11 +289,11 @@ class ContractorOptEinsum:
 
         # print("ContractorOptEinsum.contract_with_QCTN called")
 
-        input_ranks, adjacency_matrix, output_ranks = qctn.circuit
+        input_ranks, adjacency_matrix, output_ranks = _build_circuit_from_adjacency_table(qctn)
         cores_name = qctn.cores
         cores_weights = qctn.cores_weights
 
-        target_input_ranks, target_adjacency_matrix, target_output_ranks = target_qctn.circuit
+        target_input_ranks, target_adjacency_matrix, target_output_ranks = _build_circuit_from_adjacency_table(target_qctn)
         target_cores_name = target_qctn.cores
         target_cores_weights = target_qctn.cores_weights
 
@@ -273,7 +304,7 @@ class ContractorOptEinsum:
         adjacency_matrix_for_interaction = adjacency_matrix.copy()
         local_print(f'adjacency_matrix for interaction: \n{adjacency_matrix_for_interaction}')
         
-        from ..core.qctn import QCTNHelper
+        from ..utils.graph_generators import QCTNHelper
         for element in QCTNHelper.triu_ndindex(len(cores_name)):
             i, j = element
             if adjacency_matrix_for_interaction[i, j]:
@@ -347,8 +378,8 @@ class ContractorOptEinsum:
         for core_name in target_cores_name:
             local_print(f'Target Core: {core_name}, Shape: {target_cores_weights[core_name].shape}')
         
-        local_print(f'QCTN: {qctn.circuit}')
-        local_print(f'Target QCTN: {target_qctn.circuit}')
+        local_print(f'QCTN cores: {qctn.cores}')
+        local_print(f'Target QCTN cores: {target_qctn.cores}')
         local_print(f'Einsum Equation: {einsum_equation}')
         local_print(f'Tensor Shapes: {tensor_shapes}')
 
@@ -383,7 +414,7 @@ class ContractorOptEinsum:
         """
         
 
-        input_ranks, adjacency_matrix, output_ranks = qctn.circuit
+        input_ranks, adjacency_matrix, output_ranks = _build_circuit_from_adjacency_table(qctn)
         cores_name = qctn.cores
         cores_weights = qctn.cores_weights
 
@@ -393,7 +424,7 @@ class ContractorOptEinsum:
         adjacency_matrix_for_interaction = adjacency_matrix.copy()
         local_print(f'adjacency_matrix for interaction: \n{adjacency_matrix_for_interaction}')
         
-        from ..core.qctn import QCTNHelper
+        from ..utils.graph_generators import QCTNHelper
         for element in QCTNHelper.triu_ndindex(len(cores_name)):
             i, j = element
             if adjacency_matrix_for_interaction[i, j]:
@@ -486,7 +517,7 @@ class ContractorOptEinsum:
         for core_name in cores_name:
             local_print(f'Core: {core_name}, Shape: {cores_weights[core_name].shape}')
 
-        local_print(f'QCTN: {qctn.circuit}')
+        local_print(f'QCTN cores: {qctn.cores}')
         local_print(f'Einsum Equation: {einsum_equation}')
         local_print(f'Tensor Shapes: {tensor_shapes}')
 

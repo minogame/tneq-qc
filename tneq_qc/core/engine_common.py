@@ -270,6 +270,10 @@ class EngineCommon:
     ):
         """Append a component to the contraction pipeline.
 
+        .. deprecated::
+            Pipeline system will be removed.  Use
+            :meth:`contract_with_compiled_strategy` directly.
+
         Args:
             name: A user-defined label for this entry.
             entry_type: One of ``'circuit'``, ``'mx'``, ``'tn'``,
@@ -280,6 +284,11 @@ class EngineCommon:
             data: Auxiliary data – circuit state vectors (list) or
                 measurement matrices (list), depending on *entry_type*.
         """
+        import warnings
+        warnings.warn(
+            "add_pipeline_entry is deprecated. Use contract_with_compiled_strategy directly.",
+            DeprecationWarning, stacklevel=2,
+        )
         if isinstance(entry_type, str):
             entry_type = PipelineEntryType[entry_type.upper()]
 
@@ -291,7 +300,16 @@ class EngineCommon:
         })
 
     def clear_pipeline(self):
-        """Remove all entries from the contraction pipeline."""
+        """Remove all entries from the contraction pipeline.
+
+        .. deprecated::
+            Pipeline system will be removed.
+        """
+        import warnings
+        warnings.warn(
+            "clear_pipeline is deprecated.",
+            DeprecationWarning, stacklevel=2,
+        )
         self._pipeline.clear()
 
     # ================================================================
@@ -483,6 +501,9 @@ class EngineCommon:
     ):
         """Execute the contraction using current qubit-ops and pipeline.
 
+        .. deprecated::
+            Use :meth:`contract_with_compiled_strategy` directly.
+
         This is the top-level convenience method.  It:
 
         1. Maps ``qctn_list`` to pipeline entries positionally to
@@ -500,6 +521,11 @@ class EngineCommon:
         Returns:
             Contraction result.
         """
+        import warnings
+        warnings.warn(
+            "run_pipeline is deprecated. Use contract_with_compiled_strategy directly.",
+            DeprecationWarning, stacklevel=2,
+        )
         qctn, right_qctn, mx_data, circuit_data, measure_is_matrix = \
             self._resolve_pipeline_inputs(qctn_list)
 
@@ -526,6 +552,9 @@ class EngineCommon:
     ) -> Tuple:
         """Like :meth:`run_pipeline` but returns ``(loss, grads)``.
 
+        .. deprecated::
+            Use :meth:`contract_with_compiled_strategy_for_gradient` directly.
+
         Delegates to :meth:`contract_with_compiled_strategy_for_gradient`.
 
         Args:
@@ -533,6 +562,12 @@ class EngineCommon:
                 the pipeline entries.  For example
                 ``[circuit_qctn, qctn, mx]``.
         """
+        import warnings
+        warnings.warn(
+            "run_pipeline_for_gradient is deprecated. "
+            "Use contract_with_compiled_strategy_for_gradient directly.",
+            DeprecationWarning, stacklevel=2,
+        )
         qctn, right_qctn, mx_data, circuit_data, measure_is_matrix = \
             self._resolve_pipeline_inputs(qctn_list)
 

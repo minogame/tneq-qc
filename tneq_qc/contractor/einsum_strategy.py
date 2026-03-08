@@ -104,10 +104,17 @@ class EinsumStrategy(ContractionStrategy):
     def name(self) -> str:
         return "einsum_default"
 
+    # ================================================================
+    # Legacy static methods (deprecated — use QCTN.get_einsum_info instead)
+    # These directly parse qctn.adjacency_table to build einsum expressions.
+    # Kept for backward compatibility with engine.py and existing tests.
+    # ================================================================
+
     @staticmethod
     def build_core_only_expression(qctn) -> Tuple[str, List]:
-        """
-        Build einsum expression for contracting cores only (no inputs).
+        """Build einsum expression for contracting cores only (no inputs).
+
+        .. deprecated:: Use ``qctn.get_einsum_info()`` instead.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network to contract.
@@ -166,8 +173,9 @@ class EinsumStrategy(ContractionStrategy):
 
     @staticmethod
     def build_with_inputs_expression(qctn, inputs_shape) -> Tuple[str, List]:
-        """
-        Build einsum expression for contracting with single input tensor.
+        """Build einsum expression for contracting with single input tensor.
+
+        .. deprecated:: Use ``qctn.get_einsum_info()`` instead.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network to contract.
@@ -228,8 +236,9 @@ class EinsumStrategy(ContractionStrategy):
 
     @staticmethod
     def build_with_vector_inputs_expression(qctn, inputs_shapes: List) -> Tuple[str, List]:
-        """
-        Build einsum expression for contracting with vector inputs.
+        """Build einsum expression for contracting with vector inputs.
+
+        .. deprecated:: Use ``qctn.get_einsum_info()`` instead.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network to contract.
@@ -290,8 +299,9 @@ class EinsumStrategy(ContractionStrategy):
 
     @staticmethod
     def build_with_qctn_expression(qctn, target_qctn) -> Tuple[str, List]:
-        """
-        Build einsum expression for contracting two QCTNs together.
+        """Build einsum expression for contracting two QCTNs together.
+
+        .. deprecated:: Use ``qctn.get_einsum_info()`` instead.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network to contract.
@@ -393,8 +403,9 @@ class EinsumStrategy(ContractionStrategy):
 
     @staticmethod
     def _build_with_self_expression_legacy(qctn, circuit_states_shape=None, measure_shape=None, measure_is_matrix=False) -> Tuple[str, List]:
-        """
-        Build einsum expression for contracting QCTN with itself (hermitian conjugate).
+        """Build einsum expression for contracting QCTN with itself (hermitian conjugate).
+
+        .. deprecated:: Kept for reference/validation. Use ``qctn.get_einsum_info()`` instead.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network to contract.

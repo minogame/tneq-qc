@@ -1,488 +1,21 @@
+import warnings
 import numpy as np
-import itertools
-import re, random
+import re
 from pathlib import Path
-from typing import Union, Any, Optional, Mapping
-from ..config import Configuration
-from ..backends.copteinsum import ContractorOptEinsum
+from typing import Union, Optional, Mapping
+from copy import deepcopy
+from enum import Enum
 from .tn_tensor import TNTensor
 from .tn_graph import TNGraph
-
-class QCTNHelper:
-    """
-    Helper class for Quantum Circuit Tensor Network (QCTN) operations.
-    Provides methods for converting quantum circuit graphs to adjacency matrices and counting qubits.
-    """
-
-    @staticmethod
-    def iter_symbols(extend=False):
-        """
-        Generate a sequence of symbols for quantum circuit cores.
-        If extend is True, use a range of Chinese characters; otherwise, use uppercase letters
-        """
- 
-        if extend:
-            symbols = [chr(i) for i in range(0x4E00, 0x9FFF + 1)]
-            random.shuffle(symbols)  # Shuffle the symbols for randomness
-            symbols = "".join(symbols)
-        else:
-            symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        for symbol in symbols:
-            yield symbol
-
-    @staticmethod
-    def generate_example_graph(n=16, target=False, graph_type="any", dim_char=None):
-        """Generate an example quantum circuit graph."""
-        if target:
-            return  "-2-A-5-----C-3-----E-2-\n" \
-                    "-2-----B----4------E-2-\n" \
-                    "-2-A-4-B-7-C-2-D-4-E-2-\n" \
-                    "-2-----B-6-----D-----2-\n" \
-                    "-2-A-3-----C-8-D-----2-"
-        else:
-            def generate_mps_graph(n, dim_char=None):
-                graph = ""
-                # char_list = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
-                # char_list = [next(QCTNHelper.iter_symbols(True)) for _ in range(n)]
-                import opt_einsum
-                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
-
-                if dim_char is None:
-                    dim_char = '3'
-
-                for i in range(n):
-                    cid = i - 1
-                    nid = i
-                    if i == 0:
-                        line = f"-{dim_char}-" + char_list[i] + (n - 2) * 6 * "-" + f"-{dim_char}-"
-                    elif i == n - 1:
-                        line = f"-{dim_char}-" + (n - 2) * 6 * "-" + char_list[cid] + f"-{dim_char}-"
-                    else:
-                        line = f"-{dim_char}-"
-                        line += cid * 6 * "-"
-                        line += char_list[cid]
-                        line += f"--{dim_char}--"
-                        line += char_list[nid]
-                        line += (n - nid - 2) * 6 * "-"
-                        line += f"-{dim_char}-"
-                    
-                    graph += line + "\n"
-                return graph
-            
-            def generate_tree_graph(n, dim_char='3'):
-                "graph like a tree structure"
-                """
-                -3-------A-3-
-                -3---B-3-A-3-
-                -3---B-3-C-3-
-                -3-------C-3-
-
-                -3---------A-3-
-                -3-----B-3-A-3-
-                -3-C-3-B-----3-
-                -3-C-3-D-----3-
-                -3-----D-3-E-3-
-                -3---------E-3-
-                """
-                graph = ""
-                import opt_einsum
-                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
-
-                if dim_char is None:
-                    dim_char = '3'
-                
-                m = n // 2
-
-                left = (m - 1) * 4
-                right = 0
-                for i in range(m):
-                    if i == 0:
-                        line = "-" * left
-                        line += char_list[i]
-
-                        left -= 4
-                    else:
-                        line = "-" * left
-                        line += char_list[i] + f"-{dim_char}-" + char_list[i - 1]
-                        line += '-' * right
-
-                        left -= 4
-                        right += 4
-
-                    graph += '-' + dim_char + '-' + line + '-' + dim_char + '-' + "\n"
-                
-                if n % 2 == 1:
-                    line = char_list[m - 1] + '-' * ((m - 1) * 4)
-
-                    graph += '-' + dim_char + '-' + line + '-' + dim_char + '-' + "\n"
-
-                left = 0
-                right = (m - 2) * 4
-                for i in range(m, m * 2):
-                    if i < m * 2 - 1:
-                        line = "-" * left
-                        line += char_list[i - 1] + f"-{dim_char}-" + char_list[i]
-                        line += '-' * right
-
-                        left += 4
-                        right -= 4
-                    else:
-                        line = "-" * left
-                        line += char_list[i - 1]
-                    graph += '-' + dim_char + '-' + line + '-' + dim_char + '-' + "\n"
-                
-                return graph
-            
-            def generate_wall_graph_col(n, L, dim_char='3'):
-                """
-                Generate a brick wall structure graph.
-                n: number of qubits (rows)
-                L: number of layers/columns
-                dim_char: dimension character for physical indices
-                
-                Brick wall structure: alternating layers of two-qubit gates
-                - Even layers (0, 2, 4, ...): gates on pairs (0,1), (2,3), (4,5), ...
-                - Odd layers (1, 3, 5, ...): gates on pairs (1,2), (3,4), (5,6), ...
-                
-                Example with n=4, L=4:
-                -3-A---3---B-----3-
-                -3-A-3-C-3-B-3-D-3-
-                -3-E-3-C-3-F-3-D-3-
-                -3-E---3---F-----3-
-                
-                char indices are assigned in row-major order (by row, then by layer)
-                """
-
-                graph = ""
-                import opt_einsum
-                
-                if dim_char is None:
-                    dim_char = '3'
-                
-                # Calculate total number of chars needed
-                # Each layer has floor(n/2) or ceil(n/2) interactions depending on parity
-                total_chars = L * (n // 2)
-                char_list = [opt_einsum.get_symbol(i) for i in range(total_chars)]
-                
-                # Create a 2D array to store which char connects which qubits
-                # char_map[layer][pair_index] = char_symbol
-                char_map = {}
-                char_idx = 0
-                
-                for layer in range(L):
-                    char_map[layer] = {}
-                    if layer % 2 == 0:
-                        # Even layer: pairs (0,1), (2,3), (4,5), ...
-                        for pair_idx in range(n // 2):
-                            char_map[layer][pair_idx] = char_list[char_idx]
-                            char_idx += 1
-                    else:
-                        # Odd layer: pairs (1,2), (3,4), (5,6), ...
-                        for pair_idx in range((n - 1) // 2):
-                            char_map[layer][pair_idx] = char_list[char_idx]
-                            char_idx += 1
-                
-                # Generate the graph string
-                for row in range(n):
-                    line = f"-{dim_char}-"
-                    
-                    for layer in range(L):
-                        if layer % 2 == 0:
-                            # Even layer: pairs (0,1), (2,3), (4,5), ...
-                            pair_idx = row // 2
-                            if row % 2 == 0 and pair_idx < n // 2:
-                                # First qubit in pair
-                                line += char_map[layer][pair_idx]
-                                line += f"-{dim_char}-"
-                            elif row % 2 == 1 and pair_idx < n // 2:
-                                # Second qubit in pair
-                                line += char_map[layer][pair_idx]
-                                line += f"-{dim_char}-"
-                            else:
-                                # No gate for this qubit in this layer
-                                line += f"---{dim_char}---"
-                        else:
-                            # Odd layer: pairs (1,2), (3,4), (5,6), ...
-                            if row == 0:
-                                # First qubit has no gate in odd layers
-                                line += f"---{dim_char}---"
-                            elif row == n - 1:
-                                # Last qubit has no gate in odd layers (if n is even)
-                                line += f"---{dim_char}---"
-                            else:
-                                # Middle qubits
-                                pair_idx = (row - 1) // 2
-                                if row % 2 == 1 and pair_idx < (n - 1) // 2:
-                                    # First qubit in pair
-                                    line += char_map[layer][pair_idx]
-                                    line += f"-{dim_char}-"
-                                elif row % 2 == 0 and pair_idx < (n - 1) // 2:
-                                    # Second qubit in pair
-                                    line += char_map[layer][pair_idx]
-                                    line += f"-{dim_char}-"
-                                else:
-                                    # No gate
-                                    line += f"---{dim_char}---"
-                    
-                    line += f"-{dim_char}-"
-                    graph += line + "\n"
-                
-                return graph.rstrip()
-
-            def generate_wall_graph(n, L, dim_char='3'):
-                """
-                Example with n=4, L=4:
-                -3-A-3-----B-----3-
-                -3-A-3-C-3-B-3-D-3-
-                -3-E-3-C-3-F-3-D-3-
-                -3-E-3-----F-----3-
-
-                """
-
-                graph = ""
-                import opt_einsum
-                
-                if dim_char is None:
-                    dim_char = '3'
-                
-                # Calculate total number of chars needed
-                # Each layer has floor(n/2) or ceil(n/2) interactions depending on parity
-                total_chars = L * (n // 2)
-                char_list = [opt_einsum.get_symbol(i) for i in range(total_chars)]
-                
-                line_list = [['-' for i in range(4 * L)] for j in range(n)]
-
-                for i in range(n):
-                    line_list[i][-2] = dim_char
-
-                idx = 0
-
-                m = L // 2
-                for i in range(n - 1):
-                    for j in range(m):
-                        offset = 0 if i % 2 == 0 else 4
-
-                        line_list[i][offset + 8 * j] = char_list[idx]
-                        line_list[i+1][offset + 8 * j] = char_list[idx]
-                        if j < m - 1 or (j == m - 1 and i > 0):
-                            line_list[i][offset + 8 * j + 2] = dim_char
-                        if j < m - 1 or (j == m - 1 and i != n - 2):
-                            line_list[i+1][offset + 8 * j + 2] = dim_char
-                        
-                        idx += 1
-                
-                for i in range(n):
-                    graph += "-" + dim_char + "-" + ''.join(line_list[i]) + "\n"
+from ..utils.graph_generators import QCTNHelper
 
 
-                return graph.rstrip()
+class TensorSide(Enum):
+    """Enum to track tensor side in symmetric expansion: left, middle, or right."""
+    LEFT = "L"
+    MIDDLE = "M"
+    RIGHT = "R"
 
-            def generate_circuit_graph(n, dim_char='2'):
-                graph = ""
-                import opt_einsum
-                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
-
-                if dim_char is None:
-                    dim_char = '2'
-                
-                for i in range(n):
-                    graph += "-" + char_list[i] + "-" + dim_char + "-\n"
-                return graph
-                
-            
-            def generate_mx_graph(n, dim_char='2'):
-                graph = ""
-                import opt_einsum
-                char_list = [opt_einsum.get_symbol(i) for i in range(n)]
-
-                if dim_char is None:
-                    dim_char = '2'
-                
-                for i in range(n):
-                    graph += "-" + dim_char + "-" + char_list[i] + "-" + dim_char + "-\n"
-                return graph
-
-
-            if graph_type == "mps":
-                return generate_mps_graph(n, dim_char)
-            elif graph_type == "tree":
-                return generate_tree_graph(n, dim_char)
-            elif graph_type == "wall":
-                # For wall graph, we need to determine L (number of layers)
-                # Default to n layers if not specified
-                L = 4
-                return generate_wall_graph(n, L, dim_char)
-            elif graph_type == "circuit":
-                return generate_circuit_graph(n, dim_char)
-            elif graph_type == "mx":
-                return generate_mx_graph(n, dim_char)
-
-            return generate_mps_graph(n, dim_char)
-
-            
-            # return  "-3-A-3-"
-            # return  "-3-A-3-B-3-C-3-D-3-"
-
-            # return  "-3-A-3-\n" \
-            #         "-3-A-3-"
-
-            # return  "-3-A-3-B-3-C-3-\n" \
-            #         "-3-A-3-B-3-C-3-"
-
-            # return  "-3-A-3-\n" \
-            #         "-3-A-3-\n" \
-            #         "-3-A-3-"
-
-            # return  "-3-A-----3-\n" \
-            #         "-3-A-3-B-3-\n" \
-            #         "-3-----B-3-"
-
-            # return  "-3-A-3-\n" \
-            #         "-3-A-3-\n" \
-            #         "-3-A-3-\n" \
-            #         "-3-A-3-"
-
-
-            # return  "-3-a-3-b-3-c---------3-\n" \
-            #         "-3-a-3-b-------------3-\n" \
-            #         "-3-a-3-b-3-c---------3-\n" \
-            #         "-3---------c---------3-"
-        
-            # return  "-3-a-3-----c-3-d-3-e-3-\n" \
-            #         "-3-a-3-b-3-----d-3-e-3-\n" \
-            #         "-3-a-3-b-3-c-3-----e-3-\n" \
-            #         "-3-----b-3-c-3-d-3-e-3-"
-        
-            # return  "-3-A--------3--C--3--D-3-\n" \
-            #         "-3-A--3--B--------3--D-3-\n" \
-            #         "-3-------B--3--C--3--D-3-"
-        
-            # return  "-3-a-------------3-e-3-\n" \
-            #         "-3-a-3-b-----3-d-3-e-3-\n" \
-            #         "-3-----b-3-c-3-d-----3-\n" \
-            #         "-3---------c---------3-"
-            
-            return  "-3-a-------------3-e-3-\n" \
-                    "-3-a-3-b-----3-d-3-e-3-\n" \
-                    "-3-f-3-b-3-c-3-d-3-g-3-\n" \
-                    "-3-f-3-----c-----3-g-3-"
-        
-            
-
-            # return  "-3-A-------------------3-\n" \
-            #         "-3-A--3--B-------------3-\n" \
-            #         "-3-------B--3--C-------3-\n" \
-            #         "-3-------------C--3--D-3-\n" \
-            #         "-3-------------------D-3-"
-        
-            return  "-3-A-------------------------3-\n" \
-                    "-3-A--3--B-------------------3-\n" \
-                    "-3-------B--3--C-------------3-\n" \
-                    "-3-------------C--3--D-------3-\n" \
-                    "-3-------------------D--3--E-3-\n" \
-                    "-3-------------------------E-3-"
-            
-
-            # circuit_states.
-            # (1, K), 001 
-
-
-            # return  "-2-A-2-"
-            # return  "-2-A-3-B-4-C-3-D-2-"
-        
-            # return  "-2-A-2-\n" \
-            #         "-2-A-2-"
-
-            return  "-2-A-------------------4-\n" \
-                    "-2-A--3--B-------------4-\n" \
-                    "-2-------B--3--C-------4-\n" \
-                    "-2-------------C--3--D-4-\n" \
-                    "-2-------------------D-4-"
-
-
-            return  "-2-A-5-----C-3-----E-2-\n" \
-                    "-2-----B----4------E-2-\n" \
-                    "-2-A-4-B-7-C-2-D-4-E-2-\n" \
-                    "-2-----B-6-----D-----2-\n" \
-                    "-2-A-3-----C-8-D-----2-"
-        
-            return  "-2-A--------5--C--5--D-5-\n" \
-                    "-2-A--5--B--------5--D-5-\n" \
-                    "-2-------B--5--C--5--D-5-"
-        
-            return  "-2-A--------2--C--2--D-2-\n" \
-                    "-2-A--2--B--------2--D-2-\n" \
-                    "-2-------B--2--C--2--D-2-"
-        
-
-            return  "-2-A--------5--C--7--D--9--E--9--F--------9-\n" \
-                    "-2-A--3--B--------7--D--------9--F--7--G-9-\n" \
-                    "-2-------B--5--C--7--D--9--E--------9--G-9-"
-        
-
-            return  "-2-A--------5--C--------9--E--9--F--7-----9--H-9-\n" \
-                    "-2-A--3--B--5--C--7--D--9--E--9--F--7--G--9--H-9-\n" \
-                    "-2-------B--------7--D--9--E--9--------G-------9-"
-
-
-            return  "-2-A--------5--C-------7-\n" \
-                    "-2-A--3--B--5--C--7--D-9-\n" \
-                    "-2-------B--------7--D-9-"
-        
-            return  "-2-A--------5--C-------5-\n" \
-                    "-2-A--5--B--5--C--5--D-5-\n" \
-                    "-2-------B--------5--D-5-"
-
-        
-            
-
-            # return  "-2-A-----------------------------------------A-2-\n" \
-            #         "-2-A--2--B-----------------------------B--2--A-2-\n" \
-            #         "-2-------B--2--C-----------------C--2--B-------2-\n" \
-            #         "-2-------------C--2--D-----D--2--C-------------2-\n" \
-            #         "-2-------------------D--2--D-------------------2-"
-
-            return  "-2-----B-5-C-3-D-----2-\n" \
-                    "-2-A-4---------D-----2-\n" \
-                    "-2-A-4-B-7-C-2-D-4-E-2-\n" \
-                    "-2-A-3-B-6---------E-2-\n" \
-                    "-2---------C-8-----E-2-"
-            """
-            -2-A-------------------2-
-            -2-A--2--B-------------2-
-            -2-------B--2--C-------2-
-            -2-------------C--2--D-2-
-            -2-------------------D-2-
-            """
-
-
-    @staticmethod
-    def generate_example_graph2():
-        """Generate an example quantum circuit graph."""
-
-    
-    @staticmethod
-    def generate_random_example_graph(nqubits=5, ncores=3):
-        """Generate a random quantum circuit graph with specified number of qubits and cores."""
-
-        cores = "".join([next(QCTNHelper.iter_symbols(True)) for _ in range(ncores)])
-        graph = ""
-        for i in range(nqubits):
-            qubit = f"-{np.random.randint(2, 10)}-"
-            for j in cores:
-                if np.random.rand() > 0.5:
-                    qubit += f"{j}-{np.random.randint(2, 10)}-"
-
-            graph += f"{qubit}\n"
-
-        return graph.strip()
-    
-    @staticmethod
-    def triu_ndindex(n):
-        """Generate indices for the upper triangular part of a square matrix."""
-        for i in range(n):
-            for j in range(i + 1, n):
-                yield (i, j)
 
 class QCTN:
     """
@@ -505,8 +38,7 @@ class QCTN:
 
     Attributes:
         nqubits (int): Number of qubits in the quantum circuit.
-        adjacency_matrix: (np.ndarray): Adjacency matrix representing the connection ranks with empty diagonal entries.
-        circuit (tuple): (Input ranks, Connection ranks, Output ranks) for each core.
+        adjacency_table (list[dict]): Per-core adjacency info with in/out edges, shapes, and dims.
  
     """
 
@@ -530,74 +62,61 @@ class QCTN:
         core2idx = {c: i for i, c in enumerate(idx2core)}
 
         full_cores = set([opt_einsum.get_symbol(i) for i in range(10000)])
-        # full_cores = set([next(QCTNHelper.iter_symbols(True)) for _ in range(20000)])
 
         self.cores = list(set([c for c in graph if c in full_cores]))
-        # 把self.cores按照在full_cores的相对顺序排序
         self.cores.sort(key=lambda x: core2idx[x])
 
-        print(f"num cores: {len(self.cores)}")
-
-
-        # self.cores = [opt_einsum.get_symbol(i) for i in range(self.nqubits-1)]
-
-
-        # self.cores = list(set([c for c in graph if c.isupper()]))
-        # if not self.cores:
-        #     # If no uppercase core symbols found, try to find all chars in the CJK Unified Ideographs range
-        #     self.cores = list(set([c for c in graph if 0x4E00 <= ord(c) <= 0x9FFF]))
         self.ncores = len(self.cores)
 
-        # self.cores = sorted(self.cores)
-
-        # This will build the attributes `self.circuit` and `self.adjacency_matrix`
+        # Build adjacency_table from graph string
         self._circuit_to_adjacency()
 
         self.backend = backend
         self._loaded_metadata: Optional[Mapping[str, str]] = None
 
-        # Initialize the circuit with input ranks, adjacency matrix, and output ranks
-        # self.initialize_random_key = jax.random.PRNGKey(0)
-
         # Initialize the cores with random values
         self.cores_weights = {}
         self._init_cores()
 
-        # Placeholders for einsum expressions
-        self.einsum_expr = None
+        # Circuit states and measure matrices — part of the tensor network
+        self.circuit_states = None   # list or dict of per-qubit circuit state tensors
+        self.measure_matrices = None # list or dict of per-qubit measure matrices
 
         # Phase 2: submodule registry (nn.Module-style nesting)
         self._submodules: dict = {}
 
     @classmethod
     def envolve_from_another_qctn(cls, qctn, strategies=None):
-        """
-        Create a new QCTN instance by evolving from another QCTN instance.
-        
+        """Create a new QCTN instance by evolving from another QCTN instance.
+
+        .. deprecated::
+            This method will be moved to the ``genetic`` module in a future
+            release.  Use ``genetic.evolve(qctn, strategies)`` instead.
+
         Args:
             qctn (QCTN): The original QCTN instance to evolve from.
-            strategies (list, optional): A list of strategies for evolution. Defaults to None.
-        
+            strategies (list, optional): Strategies for evolution.
+
         Returns:
             QCTN: A new QCTN instance evolved from the original.
         """
+        warnings.warn(
+            "QCTN.envolve_from_another_qctn is deprecated and will be moved "
+            "to the genetic module in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if strategies is None \
            or (isinstance(strategies, list) and not strategies):
-            # If no strategies are provided, simply copy the original QCTN
-            # This is useful for cases where we want to create a new instance without any modifications.
-            # The optimization can be skipped.
             if isinstance(qctn, cls):
-                # If qctn is already an instance of QCTN, copy it
                 return cls.copy(qctn)
             else:
-                # If qctn is not an instance of QCTN, raise an error
                 raise TypeError("qctn must be an instance of QCTN.")
 
-        if isinstance(strategies, function):
+        if callable(strategies):
             new_graph = strategies(qctn.graph)
             return cls(new_graph)
         elif isinstance(strategies, list):
-            # Apply each strategy to the original graph
             new_graph = qctn.graph
             for strategy in strategies:
                 if callable(strategy):
@@ -607,20 +126,15 @@ class QCTN:
             return cls(new_graph)
 
     def __repr__(self):
-        """
-        String representation of the QCTN object.
-        """
-        # print(f"adjacency_table: {self.adjacency_table}")
+        """String representation of the QCTN object."""
+        circuit_input = [str(info['input_shape']) for info in self.adjacency_table]
+        circuit_output = [str(info['output_shape']) for info in self.adjacency_table]
 
-        adjacency_matrix = np.empty((self.ncores, self.ncores), dtype=object)
-        for i in range(self.ncores):
-            for j in range(self.ncores):
-                adjacency_matrix[i, j] = str(self.adjacency_matrix[i, j])
-        
-        circuit_input = [str(rank) for rank in self.circuit[0]]
-        circuit_output = [str(rank) for rank in self.circuit[2]]
-
-        return f"circuit_input = \n{circuit_input}\n adjacency_matrix = \n{adjacency_matrix}\n adjacency_table = \n{self.adjacency_table}\n circuit_output = \n{circuit_output}\n"
+        return (
+            f"circuit_input = \n{circuit_input}\n"
+            f" adjacency_table = \n{self.adjacency_table}\n"
+            f" circuit_output = \n{circuit_output}\n"
+        )
 
     def _circuit_to_adjacency(self,):
         """
@@ -738,34 +252,6 @@ class QCTN:
             core_info['input_dim'] = int(np.prod(core_info['input_shape'])) if core_info['input_shape'] else 1
             core_info['output_dim'] = int(np.prod(core_info['output_shape'])) if core_info['output_shape'] else 1
 
-        # Build adjacency_matrix from adjacency_table for backward compatibility
-        self.adjacency_matrix = np.empty((self.ncores, self.ncores), dtype=object)
-        for i in range(self.ncores):
-            for j in range(self.ncores):
-                self.adjacency_matrix[i, j] = []
-        
-        for core_info in self.adjacency_table:
-            core_idx = core_info['core_idx']
-            for edge in core_info['out_edge_list']:
-                if edge['neighbor_idx'] >= 0:  # Skip output edges (to circuit output)
-                    self.adjacency_matrix[core_idx, edge['neighbor_idx']].append(edge['edge_rank'])
-                    self.adjacency_matrix[edge['neighbor_idx'], core_idx].append(edge['edge_rank'])
-
-        # Build circuit tuple for backward compatibility
-        input_ranks = np.empty(self.ncores, dtype=object)
-        output_ranks = np.empty(self.ncores, dtype=object)
-        for i in range(self.ncores):
-            input_ranks[i] = self.adjacency_table[i]['input_shape'].copy()
-            output_ranks[i] = self.adjacency_table[i]['output_shape'].copy()
-        self.circuit = (input_ranks, self.adjacency_matrix, output_ranks)
-
-        # for debug, print adjacency_table
-        # for core_info in self.adjacency_table:
-        #     print(f"Core {core_info['core_name']} (idx {core_info['core_idx']}):")
-        #     print(f"  input_shape: {core_info['input_shape']}, output_shape: {core_info['output_shape']}")
-        #     print(f"  input_dim: {core_info['input_dim']}, output_dim: {core_info['output_dim']}")
-        #     print(f"  In edges: {core_info['in_edge_list']}")
-        #     print(f"  Out edges: {core_info['out_edge_list']}")
 
     def _init_cores(self):
         """
@@ -1028,233 +514,6 @@ class QCTN:
         instance.load_cores(file_path, strict=strict)
         return instance
 
-
-    def _contract_core_only(self, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network without inputs.
-        """
-
-        return engine.contract_core_only(self)
-
-    def _contract_with_inputs(self, inputs: Any = None, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network with given inputs.
-
-        Args:
-            inputs (Any): The inputs for the contraction operation.
-                It should be a tensor with the shape matching the input ranks of the circuit.
-
-        Returns:
-            The result of the contraction operation.
-        """
-
-        # Validate inputs
-        if inputs is None:
-            raise ValueError("Inputs must be provided for contraction.")
-        if not isinstance(inputs, self.backend.get_tensor_type()):
-            raise TypeError(f"Inputs must be a {self.backend.get_tensor_type()}.")
-        if inputs.shape != tuple(itertools.chain.from_iterable(self.circuit[0])):
-            raise ValueError(f"Input tensor shape {inputs.shape} does not match expected shape {tuple(itertools.chain.from_iterable(self.circuit[0]))}.")
-
-        return engine.contract_with_inputs(self, inputs)
-
-    def _contract_with_vector_inputs(self, inputs: list = None, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network with given inputs.
-
-        Args:
-            inputs (list): The inputs for the contraction operation.
-                It should be a tensor with the shape matching the input ranks of the circuit.
-
-        Returns:
-            The result of the contraction operation.
-        """
-
-        # Validate inputs
-        if inputs is None:
-            raise ValueError("Inputs must be provided for contraction.")
-        if not all(isinstance(t, self.backend.get_tensor_type()) for t in inputs):
-            raise TypeError(f"All elements in the list must be {self.backend.get_tensor_type()}.")
-        if len(inputs) != self.nqubits:
-            raise ValueError(f"Expected {self.nqubits} input vectors, got {len(inputs)}.")
-        
-        # Check dimensions of all inputed vectors
-        if not all(t.ndim == 1 for t in inputs):
-            raise ValueError("All input tensors must be 1-dimensional vectors.")
-
-        if tuple(t.shape[0] for t in inputs) != tuple(itertools.chain.from_iterable(self.circuit[0])):
-            raise ValueError(f"Input tensor shapes {tuple(t.shape for t in inputs)} do not match expected shape {tuple(itertools.chain.from_iterable(self.circuit[0]))}.")
-
-        return engine.contract_with_vector_inputs(self, inputs)
-
-    def _contract_with_QCTN(self, qctn, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network with another QCTN instance.
-        
-        Args:
-            qctn (QCTN): Another instance of QCTN to contract with.
-        
-        Returns:
-            The result of the contraction operation.
-        """
-
-        if not list(itertools.chain.from_iterable(self.circuit[0])) == list(itertools.chain.from_iterable(qctn.circuit[0])):
-            raise ValueError("Input ranks of the two QCTNs do not match.")
-        if not list(itertools.chain.from_iterable(self.circuit[2])) == list(itertools.chain.from_iterable(qctn.circuit[2])):
-            raise ValueError("Output ranks of the two QCTNs do not match.")
-        
-        return engine.contract_with_QCTN(self, qctn)
-    
-    def _contract_with_QCTN_for_gradient(self, qctn, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network for a specific core gradient.
-        
-        Args:
-            qctn : Another instance of QCTN to contract with.
-        
-        Returns:
-            The result of the contraction operation for core gradient.
-        """
-
-        if not list(itertools.chain.from_iterable(self.circuit[0])) == list(itertools.chain.from_iterable(qctn.circuit[0])):
-            raise ValueError("Input ranks of the two QCTNs do not match.")
-        if not list(itertools.chain.from_iterable(self.circuit[2])) == list(itertools.chain.from_iterable(qctn.circuit[2])):
-            raise ValueError("Output ranks of the two QCTNs do not match.")
-
-        return engine.contract_with_QCTN_for_gradient(self, qctn)
-
-    def contract(self, attach: Union[Any, 'QCTN', list] = None, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network.
-
-        Args:
-            attach (Union[Any, list[Any], 'QCTN'], optional): The inputs for the contraction operation.
-                If a tensor is provided, it should be a tensor with the shape matching the input ranks of the circuit.
-                If a list of tensors is provided, it should contain vectors for each qubit.
-                If a QCTN instance is provided, it will contract with that instance.
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of the contraction operation.
-        """
-
-        if attach is None:
-            return self._contract_core_only(engine)
-        elif isinstance(attach, self.backend.get_tensor_type()):
-            print('contract with tensor')
-            return self._contract_with_inputs(attach, engine)
-        elif isinstance(attach, list):
-            print('contract with list of tensors')
-            return self._contract_with_vector_inputs(attach, engine)
-        elif isinstance(attach, QCTN):
-            print('contract with QCTN')
-            return self._contract_with_QCTN(attach, engine)
-        else:
-            raise TypeError(f"attach must be a {self.backend.get_tensor_type()}, a list of {self.backend.get_tensor_type()} or an instance of QCTN.")
-    
-    def _contract_with_self(self, engine=ContractorOptEinsum, circuit_array_input=None, circuit_list_input=None):
-        """
-        Contract the quantum circuit tensor network with itself.
-
-        Args:
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of the contraction operation.
-        """
-
-        return engine.contract_with_self(self, circuit_array_input, circuit_list_input)
-
-    def _contract_with_self_for_gradient(self, engine=ContractorOptEinsum, circuit_array_input=None, circuit_list_input=None):
-        """
-        Contract the quantum circuit tensor network with itself.
-
-        Args:
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of the contraction operation.
-        """
-
-        return engine.contract_with_self_for_gradient(self, circuit_array_input, circuit_list_input)
-
-    def contract_with_self(self, attach: Union[Any, 'QCTN', list] = None, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network with itself.
-
-        Args:
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of the contraction operation.
-        """
-        if attach is None:
-            return self._contract_with_self(engine)
-        elif isinstance(attach, self.backend.get_tensor_type()):
-            return self._contract_with_self(engine, circuit_array_input=attach)
-        elif isinstance(attach, list):
-            raise TypeError("attach must be None when contracting with self.")
-        elif isinstance(attach, QCTN):
-            raise TypeError("attach must be None when contracting with self.")
-        else:
-            raise TypeError("attach must be None when contracting with self.")
-    
-    def contract_with_self_for_gradient(self, attach: Union[Any, 'QCTN', list] = None, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network with itself.
-
-        Args:
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of the contraction operation.
-        """
-        if attach is None:
-            return self._contract_with_self_for_gradient(engine)
-        elif isinstance(attach, self.backend.get_tensor_type()):
-            return self._contract_with_self_for_gradient(engine, circuit_array_input=attach)
-        elif isinstance(attach, list):
-            raise TypeError("attach must be None when contracting with self.")
-        elif isinstance(attach, QCTN):
-            raise TypeError("attach must be None when contracting with self.")
-        else:
-            raise TypeError("attach must be None when contracting with self.")
-
-    def contract_with_QCTN_for_gradient(self, attach, engine=ContractorOptEinsum):
-        """
-        Contract the quantum circuit tensor network, return the loss and the gradient for all cores,
-        The attach must be a QCTN instance.
-        The loss for gradient computation is (X @ Y^T - 1) ** 2, where X is self and Y is the attach QCTN.
-        The gradient only computes the core gradients, not the input gradients.
-        
-
-        Args:
-            attach ('QCTN'): The inputs for the contraction operation.
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The result of value and grad.
-        """
-        if not isinstance(attach, QCTN):
-            raise TypeError("attach must be an instance of QCTN.")
-        return self._contract_with_QCTN_for_gradient(attach, engine)
-    
-    def optimize_contract_with_QCTN(self, attach, optimizer, engine=ContractorOptEinsum):
-        """
-        Optimize the contraction with another QCTN instance using a specified optimizer.
-
-        Args:
-            attach (QCTN): The QCTN instance to contract with.
-            optimizer (Optimizer): The optimizer to use for the optimization process.
-            engine (ContractorOptEinsum): The contraction engine to use. Default is ContractorOptEinsum.
-
-        Returns:
-            The optimized parameters after the contraction operation.
-        """
-        if not isinstance(attach, QCTN):
-            raise TypeError("attach must be an instance of QCTN.")
-        
-        return optimizer.optimize(self.contract_with_QCTN_for_gradient, attach, engine=engine)
 
     # ================================================================
     # Graph manipulation helpers
@@ -1568,7 +827,37 @@ class QCTN:
         return QCTN.merge(self, other)
 
     # ================================================================
-    # Phase 2: nn.Module-style module management (R2)
+    # nn.Module-style interface
+    # ================================================================
+
+    def define(self):
+        """Define the tensor network topology.
+
+        Subclasses should override this method to declare the network
+        structure (e.g. graph string, sub-module relationships).  The
+        default implementation returns the parsed ``tn_graph``.
+
+        Returns:
+            TNGraph: The tensor network graph for this QCTN.
+        """
+        return self.tn_graph
+
+    def forward(self, *args, **kwargs):
+        """Execute the forward computation.
+
+        Subclasses should override this method to implement custom
+        computation logic.  The base implementation raises
+        ``NotImplementedError`` to remind users to either use the
+        Engine/Strategy pipeline or provide a subclass override.
+        """
+        raise NotImplementedError(
+            "QCTN.forward() is not implemented in the base class. "
+            "Use Engine + ContractionStrategy for contraction, or "
+            "override forward() in a subclass."
+        )
+
+    # ================================================================
+    # Module management (R2)
     # ================================================================
 
     @classmethod
@@ -1881,6 +1170,395 @@ class QCTN:
                 tensors.append(circuit_states)
 
         return tensors
+
+    # ================================================================
+    # Phase 2.5: Symmetric expansion graph for row-priority contraction
+    # ================================================================
+
+    def build_symmetric_expansion_graph(
+        self,
+        circuit_states_shapes=None,
+        measure_shapes=None,
+        right_qctn="symmetric",
+    ):
+        """Build an expanded L-M-R graph for row-priority (greedy) contraction.
+
+        Constructs a ``core_tensor_list`` containing LEFT cores, LEFT circuit
+        states, MIDDLE measurement matrices (Mx), RIGHT cores, and RIGHT
+        circuit states, with all neighbor connections wired and einsum symbols
+        assigned.  This is the graph-structure counterpart of
+        :meth:`get_einsum_info` (which serves EinsumStrategy).
+
+        When ``self.circuit_states`` / ``self.measure_matrices`` are set and
+        shape parameters are not provided, shapes are auto-derived.  Actual
+        tensors are embedded into each entry's ``'tensor'`` key so that
+        downstream contraction code only needs ``entry['tensor']``.
+
+        Args:
+            circuit_states_shapes: Per-qubit circuit-state shapes.
+                * ``None`` — auto-derive from ``self.circuit_states`` if set.
+                * ``list[tuple]`` — ``circuit_states_shapes[qubit_idx]`` is the
+                  shape of that qubit's state vector, e.g. ``[(3,), (3,)]``.
+            measure_shapes: Per-qubit measurement-matrix shapes.
+                * ``None`` — auto-derive from ``self.measure_matrices`` if set.
+                * ``list[tuple|None]`` — ``measure_shapes[qubit_idx]`` is the
+                  shape of Mx, e.g. ``[(10, 3, 3), ...]``.  ``None`` entries
+                  mean "no measure on this qubit".
+            right_qctn: How to build the right (conjugate) side.
+                * ``"symmetric"`` (default) — mirror of left with reversed edges.
+                * A :class:`QCTN` instance — use its ``adjacency_table``.
+                * ``None`` — no right side.
+
+        Returns:
+            tuple[list[dict], dict]:
+                ``(core_tensor_list, maps)`` where *core_tensor_list* is the
+                fully-wired list of entry dicts and *maps* contains
+                ``left_core_map``, ``right_core_map``, ``mx_map``,
+                ``left_circuit_map``, ``right_circuit_map``.
+        """
+        import opt_einsum
+
+        # Auto-derive shapes from self when not explicitly provided
+        if circuit_states_shapes is None and self.circuit_states is not None:
+            cs = self.circuit_states
+            if isinstance(cs, dict):
+                circuit_states_shapes = [
+                    cs[i].shape if i in cs else None for i in range(self.nqubits)
+                ]
+            elif isinstance(cs, (list, tuple)):
+                circuit_states_shapes = [
+                    cs[i].shape if i < len(cs) and cs[i] is not None else None
+                    for i in range(self.nqubits)
+                ]
+
+        if measure_shapes is None and self.measure_matrices is not None:
+            mx = self.measure_matrices
+            if isinstance(mx, dict):
+                measure_shapes = [
+                    mx[i].shape if i in mx else None for i in range(self.nqubits)
+                ]
+            elif isinstance(mx, (list, tuple)):
+                measure_shapes = [
+                    mx[i].shape if i < len(mx) and mx[i] is not None else None
+                    for i in range(self.nqubits)
+                ]
+
+        core_tensor_list = []
+
+        def _get_uid():
+            return len(core_tensor_list)
+
+        # ------------------------------------------------------------------
+        # 1.1  LEFT cores
+        # ------------------------------------------------------------------
+        left_core_map = {}  # original_idx -> uid
+        for core_info in self.adjacency_table:
+            uid = _get_uid()
+            left_core_map[core_info['core_idx']] = uid
+            core_tensor_list.append({
+                'core_idx': uid,
+                'core_name': f"{core_info['core_name']}_L",
+                'tensor_source': 'core',
+                'tensor_key': core_info['core_name'],
+                'in_edge_list': deepcopy(core_info['in_edge_list']),
+                'out_edge_list': deepcopy(core_info['out_edge_list']),
+                'side': TensorSide.LEFT,
+                'original_core_idx': core_info['core_idx'],
+                'original_in_count': len(core_info['in_edge_list']),
+                'original_out_count': len(core_info['out_edge_list']),
+                'batch_symbol': "",
+            })
+
+        # ------------------------------------------------------------------
+        # 1.2  LEFT circuit states
+        # ------------------------------------------------------------------
+        left_circuit_map = {}  # qubit_idx -> uid
+        if circuit_states_shapes is not None:
+            for qubit_idx in self.qubit_indices:
+                if qubit_idx >= len(circuit_states_shapes):
+                    continue
+                shape = circuit_states_shapes[qubit_idx]
+                if shape is None:
+                    continue
+                uid = _get_uid()
+                left_circuit_map[qubit_idx] = uid
+                core_tensor_list.append({
+                    'core_idx': uid,
+                    'core_name': f"circuit_L_{qubit_idx}",
+                    'tensor_source': 'circuit',
+                    'tensor_key': qubit_idx,
+                    'in_edge_list': [],
+                    'out_edge_list': [{
+                        'neighbor_idx': -1,
+                        'neighbor_name': "",
+                        'edge_rank': shape[0],
+                        'qubit_idx': qubit_idx,
+                    }],
+                    'side': TensorSide.LEFT,
+                    'batch_symbol': "",
+                })
+
+        # ------------------------------------------------------------------
+        # 1.3  MIDDLE Mx
+        # ------------------------------------------------------------------
+        mx_map = {}  # qubit_idx -> uid
+        if measure_shapes is not None:
+            for qubit_idx in self.qubit_indices:
+                if qubit_idx >= len(measure_shapes):
+                    continue
+                mx_shape = measure_shapes[qubit_idx]
+                if mx_shape is None:
+                    continue
+                ndim = len(mx_shape)
+                batch_sym = ""
+                if ndim == 3:
+                    batch_sym = "a"
+                elif ndim == 4:
+                    batch_sym = "ab"
+                uid = _get_uid()
+                mx_map[qubit_idx] = uid
+                core_tensor_list.append({
+                    'core_idx': uid,
+                    'core_name': f"mx_{qubit_idx}",
+                    'tensor_source': 'mx',
+                    'tensor_key': qubit_idx,
+                    'in_edge_list': [{
+                        'neighbor_idx': -1,
+                        'neighbor_name': "",
+                        'edge_rank': mx_shape[-2],
+                        'qubit_idx': qubit_idx,
+                    }],
+                    'out_edge_list': [{
+                        'neighbor_idx': -1,
+                        'neighbor_name': "",
+                        'edge_rank': mx_shape[-1],
+                        'qubit_idx': qubit_idx,
+                    }],
+                    'side': TensorSide.MIDDLE,
+                    'batch_symbol': batch_sym,
+                })
+
+        # ------------------------------------------------------------------
+        # 1.4  RIGHT cores
+        # ------------------------------------------------------------------
+        right_core_map = {}  # original_idx -> uid
+        if isinstance(right_qctn, str) and right_qctn == "symmetric":
+            for core_info in self.adjacency_table:
+                uid = _get_uid()
+                right_core_map[core_info['core_idx']] = uid
+                new_in_edges = deepcopy(core_info['out_edge_list'])[::-1]
+                new_out_edges = deepcopy(core_info['in_edge_list'])[::-1]
+                core_tensor_list.append({
+                    'core_idx': uid,
+                    'core_name': f"{core_info['core_name']}_R",
+                    'tensor_source': 'transpose',
+                    'tensor_key': core_info['core_name'],
+                    'in_edge_list': new_in_edges,
+                    'out_edge_list': new_out_edges,
+                    'side': TensorSide.RIGHT,
+                    'original_core_idx': core_info['core_idx'],
+                    'original_in_count': len(core_info['in_edge_list']),
+                    'original_out_count': len(core_info['out_edge_list']),
+                    'batch_symbol': "",
+                })
+        elif isinstance(right_qctn, QCTN):
+            for core_info in right_qctn.adjacency_table:
+                uid = _get_uid()
+                core_idx = core_info['core_idx'] + len(left_core_map)
+                right_core_map[core_idx] = uid
+                core_tensor_list.append({
+                    'core_idx': uid,
+                    'core_name': f"{core_info['core_name']}_R",
+                    'tensor_source': 'core',
+                    'tensor_key': "right_" + core_info['core_name'],
+                    'in_edge_list': deepcopy(core_info['in_edge_list']),
+                    'out_edge_list': deepcopy(core_info['out_edge_list']),
+                    'side': TensorSide.RIGHT,
+                    'original_core_idx': core_idx,
+                    'original_in_count': len(core_info['in_edge_list']),
+                    'original_out_count': len(core_info['out_edge_list']),
+                    'batch_symbol': "",
+                })
+        elif right_qctn is not None:
+            raise ValueError("right_qctn must be 'symmetric', a QCTN instance, or None.")
+
+        # ------------------------------------------------------------------
+        # 1.5  RIGHT circuit states
+        # ------------------------------------------------------------------
+        right_circuit_map = {}  # qubit_idx -> uid
+        if circuit_states_shapes is not None:
+            for qubit_idx in self.qubit_indices:
+                if qubit_idx >= len(circuit_states_shapes):
+                    continue
+                shape = circuit_states_shapes[qubit_idx]
+                if shape is None:
+                    continue
+                uid = _get_uid()
+                right_circuit_map[qubit_idx] = uid
+                core_tensor_list.append({
+                    'core_idx': uid,
+                    'core_name': f"circuit_R_{qubit_idx}",
+                    'tensor_source': 'circuit',
+                    'tensor_key': qubit_idx,
+                    'in_edge_list': [{
+                        'neighbor_idx': -1,
+                        'neighbor_name': "",
+                        'edge_rank': shape[0],
+                        'qubit_idx': qubit_idx,
+                    }],
+                    'out_edge_list': [],
+                    'side': TensorSide.RIGHT,
+                    'batch_symbol': "",
+                })
+
+        # ==================================================================
+        # 2.  Wire neighbor connections
+        # ==================================================================
+
+        # 2.1  LEFT cores
+        for original_idx, new_idx in left_core_map.items():
+            entry = core_tensor_list[new_idx]
+            for edge in entry['in_edge_list']:
+                if edge.get('is_cross_partition'):
+                    continue
+                if edge['neighbor_idx'] == -1:
+                    qubit_idx = edge['qubit_idx']
+                    if qubit_idx in left_circuit_map:
+                        neighbor_uid = left_circuit_map[qubit_idx]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+                        circ_entry = core_tensor_list[neighbor_uid]
+                        circ_entry['out_edge_list'][0]['neighbor_idx'] = new_idx
+                        circ_entry['out_edge_list'][0]['neighbor_name'] = entry['core_name']
+                else:
+                    if edge['neighbor_idx'] in left_core_map:
+                        neighbor_uid = left_core_map[edge['neighbor_idx']]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+
+            for edge in entry['out_edge_list']:
+                if edge.get('is_cross_partition'):
+                    continue
+                if edge['neighbor_idx'] == -1:
+                    qubit_idx = edge['qubit_idx']
+                    if qubit_idx in mx_map:
+                        neighbor_uid = mx_map[qubit_idx]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+                        mx_entry = core_tensor_list[neighbor_uid]
+                        mx_entry['in_edge_list'][0]['neighbor_idx'] = new_idx
+                        mx_entry['in_edge_list'][0]['neighbor_name'] = entry['core_name']
+                else:
+                    if edge['neighbor_idx'] in left_core_map:
+                        neighbor_uid = left_core_map[edge['neighbor_idx']]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+
+        # 2.2  RIGHT cores
+        for original_idx, new_idx in right_core_map.items():
+            entry = core_tensor_list[new_idx]
+            for edge in entry['in_edge_list']:
+                if edge.get('is_cross_partition'):
+                    continue
+                if edge['neighbor_idx'] == -1:
+                    qubit_idx = edge['qubit_idx']
+                    if qubit_idx in mx_map:
+                        neighbor_uid = mx_map[qubit_idx]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+                        mx_entry = core_tensor_list[neighbor_uid]
+                        mx_entry['out_edge_list'][0]['neighbor_idx'] = new_idx
+                        mx_entry['out_edge_list'][0]['neighbor_name'] = entry['core_name']
+                else:
+                    if edge['neighbor_idx'] in right_core_map:
+                        neighbor_uid = right_core_map[edge['neighbor_idx']]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+
+            for edge in entry['out_edge_list']:
+                if edge.get('is_cross_partition'):
+                    continue
+                if edge['neighbor_idx'] == -1:
+                    qubit_idx = edge['qubit_idx']
+                    if qubit_idx in right_circuit_map:
+                        neighbor_uid = right_circuit_map[qubit_idx]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+                        circ_entry = core_tensor_list[neighbor_uid]
+                        circ_entry['in_edge_list'][0]['neighbor_idx'] = new_idx
+                        circ_entry['in_edge_list'][0]['neighbor_name'] = entry['core_name']
+                else:
+                    if edge['neighbor_idx'] in right_core_map:
+                        neighbor_uid = right_core_map[edge['neighbor_idx']]
+                        edge['neighbor_idx'] = neighbor_uid
+                        edge['neighbor_name'] = core_tensor_list[neighbor_uid]['core_name']
+
+        # ==================================================================
+        # 2.5  Assign symbols to edges
+        # ==================================================================
+        def _symbol_generator():
+            i = 0
+            while True:
+                sym = opt_einsum.get_symbol(i)
+                if sym not in ('a', 'b'):  # reserved for batch dims
+                    yield sym
+                i += 1
+
+        symbol_gen = _symbol_generator()
+
+        for entry in core_tensor_list:
+            for edge in entry['out_edge_list']:
+                if 'symbol' in edge:
+                    continue
+                sym = next(symbol_gen)
+                edge['symbol'] = sym
+                neighbor_idx = edge['neighbor_idx']
+                if neighbor_idx >= 0:
+                    neighbor_entry = core_tensor_list[neighbor_idx]
+                    for in_edge in neighbor_entry['in_edge_list']:
+                        if (in_edge['neighbor_idx'] == entry['core_idx']
+                                and in_edge['qubit_idx'] == edge['qubit_idx']):
+                            in_edge['symbol'] = sym
+                            break
+
+        for entry in core_tensor_list:
+            for edge in entry['in_edge_list']:
+                if 'symbol' not in edge:
+                    edge['symbol'] = next(symbol_gen)
+
+        # ==================================================================
+        # 3.  Embed actual tensors into entries
+        # ==================================================================
+        for entry in core_tensor_list:
+            source = entry['tensor_source']
+            key = entry['tensor_key']
+            if source == 'core':
+                if isinstance(right_qctn, QCTN) and isinstance(key, str) and key.startswith('right_'):
+                    actual_key = key[len('right_'):]
+                    entry['tensor'] = right_qctn.cores_weights[actual_key]
+                else:
+                    entry['tensor'] = self.cores_weights[key]
+            elif source == 'transpose':
+                t = self.cores_weights[key]
+                if self.backend is not None and self.backend.is_complex(t):
+                    entry['tensor'] = t.conj()
+                else:
+                    entry['tensor'] = t
+            elif source == 'circuit':
+                if self.circuit_states is not None:
+                    entry['tensor'] = self.circuit_states[key]
+            elif source == 'mx':
+                if self.measure_matrices is not None:
+                    entry['tensor'] = self.measure_matrices[key]
+
+        maps = {
+            'left_core_map': left_core_map,
+            'right_core_map': right_core_map,
+            'mx_map': mx_map,
+            'left_circuit_map': left_circuit_map,
+            'right_circuit_map': right_circuit_map,
+        }
+        return core_tensor_list, maps
 
     # ================================================================
     # Phase 2: Reference semantics for siamese networks (R2-引用语义)

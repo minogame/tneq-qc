@@ -13,6 +13,7 @@ from .base import ContractionStrategy
 from .einsum_strategy import EinsumStrategy
 from .mps_strategy import MPSChainStrategy
 from .greedy_strategy import GreedyStrategy
+from .row_priority_strategy import RowPriorityStrategy
 from .compiler import StrategyCompiler
 
 
@@ -42,6 +43,12 @@ def _register_builtin_strategies():
         modes=['balanced', 'full']
     )
 
+    # Register RowPriorityStrategy for balanced and full modes
+    StrategyCompiler.register_strategy(
+        RowPriorityStrategy(),
+        modes=['balanced', 'full']
+    )
+
 
 # Perform registration when module is imported
 _register_builtin_strategies()
@@ -56,5 +63,6 @@ __all__ = [
     'EinsumStrategy',
     'MPSChainStrategy',
     'GreedyStrategy',
+    'RowPriorityStrategy',
     'StrategyCompiler',
 ]

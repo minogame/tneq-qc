@@ -651,9 +651,6 @@ class Engine:
             # Initialize the dictionary to store contracted cores
             qctn.cores_weight_with_circuit_states = {}
             
-            # Get circuit structure
-            input_ranks, adjacency_matrix, output_ranks = qctn.circuit
-            
             # Verify dimensions: cores should be one less than circuit_states
             num_cores = len(qctn.cores)
             num_states = len(circuit_states_tensors)
