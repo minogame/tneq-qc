@@ -5,7 +5,7 @@ This module provides the RowPriorityStrategy class, which processes qubits
 one by one (row-by-row) using symmetric expansion: L cores, Mx, R cores.
 
 Unlike GreedyStrategy, the graph construction and wiring logic lives in
-QCTN.build_symmetric_expansion_graph().  This strategy only handles the
+QCTN.build_graph().  This strategy only handles the
 per-qubit contraction (Stage 3) and result assembly (Stage 4).
 
 The contractor is agnostic to tensor semantics (cores, circuit states,
@@ -23,21 +23,36 @@ from .base import ContractionStrategy
 class RowPriorityStrategy(ContractionStrategy):
     """Row-priority contraction strategy that processes qubits sequentially.
 
-    Delegates graph construction to ``QCTN.build_symmetric_expansion_graph``
+    Delegates graph construction to ``QCTN.build_graph``
     and focuses on per-qubit contraction logic.
     """
 
     def check_compatibility(self, qctn, shapes_info: Dict[str, Any]) -> bool:
         return True
 
-    def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend, right_qctn="symmetric") -> Callable:
+    def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend, **_kwargs) -> Callable:
+        """Return a compute function for symmetric (A · A†) contraction.
+
+        ``qctn`` and ``backend`` are captured via closure.  Core tensors are
+        read directly from ``qctn.cores_weights`` inside
+        ``qctn.build_graph()``.
+
+        An engine-adapter wrapper is returned so that the engine's standard
+        calling convention ``(cores_dict, circuit_states, measure_matrices, …)``
+        is accepted without modification (unused arguments are discarded).
+        """
         self.backend = backend
 
-        def compute_fn(qctn):
-            # Build graph — entries come with 'tensor' already embedded
-            core_tensor_list, _maps = qctn.build_symmetric_expansion_graph(
-                right_qctn=right_qctn,
-            )
+        def compute_fn():
+            """Symmetric contraction: Tr(A† · A).
+
+            Delegates graph construction to
+            ``qctn.build_graph()``, which only processes
+            ``qctn.adjacency_table``.  No circuit states or measurement
+            matrices are referenced here.
+            """
+            # Build graph — every entry already has 'tensor' embedded
+            core_tensor_list, _maps = qctn.build_graph()
 
             # ==============================================================
             # Per-qubit contraction
@@ -127,7 +142,17 @@ class RowPriorityStrategy(ContractionStrategy):
             else:
                 return _contract_remaining(core_tensor_list, backend)
 
-        return compute_fn
+        # ------------------------------------------------------------------
+        # Engine adapter
+        # The engine calls compute_fn with the standard signature:
+        #   (cores_dict, circuit_states, measure_matrices, right_cores_dict=None)
+        # All arguments are intentionally ignored here — tensors and graph
+        # structure are read directly from qctn inside build_graph.
+        # ------------------------------------------------------------------
+        def _engine_fn(_cores_dict, _circuit_states, _measure_matrices, **_):
+            return compute_fn()
+
+        return _engine_fn
 
     def estimate_cost(self, qctn, shapes_info: Dict[str, Any]) -> float:
         return 5e5

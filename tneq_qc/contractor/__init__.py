@@ -40,13 +40,13 @@ def _register_builtin_strategies():
     # Register GreedyStrategy for balanced and full modes
     StrategyCompiler.register_strategy(
         GreedyStrategy(),
-        modes=['balanced', 'full']
+        modes=['balanced']
     )
 
     # Register RowPriorityStrategy for balanced and full modes
     StrategyCompiler.register_strategy(
         RowPriorityStrategy(),
-        modes=['balanced', 'full']
+        modes=['full']
     )
 
 

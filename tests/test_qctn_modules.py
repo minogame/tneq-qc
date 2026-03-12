@@ -37,6 +37,7 @@ from tneq_qc.modules import (
     Quadratic,
 )
 from tneq_qc.contractor.einsum_strategy import EinsumStrategy
+from tneq_qc.utils.graph_generators import QCTNHelper
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +320,9 @@ class TestChunkConcat:
     def test_chunk_returns_two_qctns(self, backend):
         qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init()
         q1, q2 = qctn.chunk()
+        print(f"\n[chunk] original:\n{qctn}")
+        print(f"[chunk] q1:\n{q1}")
+        print(f"[chunk] q2:\n{q2}")
         assert isinstance(q1, QCTN)
         assert isinstance(q2, QCTN)
 
@@ -331,6 +335,9 @@ class TestChunkConcat:
         q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
         q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
         merged = QCTN.concat(q1, q2)
+        print(f"\n[concat] q1:\n{q1}")
+        print(f"[concat] q2:\n{q2}")
+        print(f"[concat] merged:\n{merged}")
         assert isinstance(merged, QCTN)
 
     def test_concat_core_count(self, backend):
@@ -343,6 +350,7 @@ class TestChunkConcat:
         q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
         q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
         merged = q1.concat_with(q2)
+        print(f"\n[concat_with] merged:\n{merged}")
         assert merged.ncores == q1.ncores + q2.ncores
 
     def test_split_raises_deprecation_warning(self, backend):
@@ -401,3 +409,84 @@ class TestContractBasic:
         result = compute_fn(cores_dict, None, None)
         t = result.tensor if isinstance(result, TNTensor) else result
         assert t.numel() >= 1
+
+# ---------------------------------------------------------------------------
+# G. Complex chunk / concat structures
+# ---------------------------------------------------------------------------
+
+class TestComplexChunkConcat:
+    """More complex concat/chunk tests with visual structure printing."""
+
+    # 1a. MPS chunk
+    def test_mps_chunk(self, backend):
+        mps = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        q1, q2 = mps.chunk()
+        print(f"\n[mps_chunk] original:\n{mps}")
+        print(f"[mps_chunk] q1:\n{q1}")
+        print(f"[mps_chunk] q2:\n{q2}")
+        assert q1.ncores + q2.ncores == mps.ncores
+
+    # 1b. MPS + Tree concat
+    def test_mps_tree_concat(self, backend):
+        tree_graph = QCTNHelper.generate_example_graph(n=4, graph_type="tree")
+        mps  = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        tree = QCTN(tree_graph, backend=backend)
+        merged = QCTN.concat(mps, tree)
+        print(f"\n[mps+tree] mps:\n{mps}")
+        print(f"[mps+tree] tree:\n{tree}")
+        print(f"[mps+tree] merged:\n{merged}")
+        assert merged.ncores == mps.ncores + tree.ncores
+
+    # 2. MPS + MPS转置 concat
+    def test_mps_mpsT_concat(self, backend):
+        mps  = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        mpsT = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        merged = QCTN.concat(mps, mpsT)
+        print(f"\n[mps+mpsT] mps:\n{mps}")
+        print(f"[mps+mpsT] mpsT:\n{mpsT}")
+        print(f"[mps+mpsT] merged:\n{merged}")
+        assert merged.ncores == mps.ncores + mpsT.ncores
+
+    # 3. CS + MPS + MX concat
+    def test_cs_mps_mx_concat(self, backend):
+        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        merged = QCTN.concat(QCTN.concat(cs, mps), mx)
+        print(f"\n[cs+mps+mx] cs:\n{cs}")
+        print(f"[cs+mps+mx] mps:\n{mps}")
+        print(f"[cs+mps+mx] mx:\n{mx}")
+        print(f"[cs+mps+mx] merged:\n{merged}")
+        assert merged.ncores == cs.ncores + mps.ncores + mx.ncores
+
+    # 4. CS + CS转置 concat
+    def test_cs_csT_concat(self, backend):
+        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        merged = QCTN.concat(cs, csT)
+        print(f"\n[cs+csT] cs:\n{cs}")
+        print(f"[cs+csT] csT:\n{csT}")
+        print(f"[cs+csT] merged:\n{merged}")
+        assert merged.ncores == cs.ncores + csT.ncores
+
+    # 5. CS + MPS + MX + MX转置 + CS转置 concat
+    def test_full_chain_concat(self, backend):
+        cs  = CircuitState(nqubits=5, phys_dim=2, backend=backend).auto_init()
+        mps = MPS(nqubits=5, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        mx  = MeasureMatrix(nqubits=5, phys_dim=2, backend=backend).auto_init()
+        mxT = MeasureMatrix(nqubits=5, phys_dim=2, backend=backend).auto_init()
+        csT = CircuitState(nqubits=5, phys_dim=2, backend=backend).auto_init()
+
+        # cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        # mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        # mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        # mxT = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        # csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        merged = cs.concat_with(mps).concat_with(mx).concat_with(mxT).concat_with(csT)
+        print(f"\n[full_chain] cs:\n{cs}")
+        print(f"[full_chain] mps:\n{mps}")
+        print(f"[full_chain] mx:\n{mx}")
+        print(f"[full_chain] mxT:\n{mxT}")
+        print(f"[full_chain] csT:\n{csT}")
+        print(f"[full_chain] merged:\n{merged}")
+        assert merged.ncores == cs.ncores + mps.ncores + mx.ncores + mxT.ncores + csT.ncores
