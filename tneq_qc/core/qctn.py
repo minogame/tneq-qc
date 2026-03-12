@@ -107,7 +107,10 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         )
 
     def __str__(self) -> str:
-        """Pretty-print tensor network structure (3-dash format, single-digit bonds).
+        """Pretty-print tensor network structure based on adjacency_table.
+
+        Uses linked-list logic to trace cores on each qubit from start to end,
+        handling both boundary-connected and internal-only cores.
 
         Example output:
             -2-A-5-B-----3-
@@ -118,46 +121,159 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         if not self.cores:
             return "QCTN(empty)"
 
-        # Parse each qubit line into [(name, left_bond, right_bond), ...]
-        # Works for both uppercase (A,B) and opt_einsum lowercase (a,b,...) core names.
-        core_pat = re.compile('|'.join(re.escape(c) for c in self.cores))
+        # Helper function to check if neighbor is boundary
+        def is_boundary(neighbor_name):
+            return neighbor_name is None or neighbor_name == ''
 
-        def _parse(line):
-            inner = line.strip('-')
-            matches = [(m.start(), m.group()) for m in core_pat.finditer(inner)]
-            result = []
-            for idx, (pos, name) in enumerate(matches):
-                lstr = inner[:pos] if idx == 0 else inner[matches[idx-1][0]+1:pos]
-                rstr = inner[pos+1:] if idx == len(matches)-1 else inner[pos+1:matches[idx+1][0]]
-                lnums = re.findall(r'\d+', lstr)
-                rnums = re.findall(r'\d+', rstr)
-                result.append((name, int(lnums[-1]) if lnums else 2,
-                                      int(rnums[0])  if rnums else 2))
-            return result
+        # Build a map: core_name -> core_info for quick lookup
+        core_map = {info['core_name']: info for info in self.adjacency_table}
 
-        parsed = [_parse(q) for q in self.qubits]
-
+        # Build output lines by tracing each qubit
         lines = []
-        for row in parsed:
-            lt = {t[0]: (t[1], t[2]) for t in row}
+        for qubit_idx in range(self.nqubits):
+            # Find all cores that touch this qubit
+            cores_on_qubit = []
+            for core_info in self.adjacency_table:
+                has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
+                has_out_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['out_edge_list'])
+                if has_in_edge or has_out_edge:
+                    cores_on_qubit.append(core_info['core_name'])
+
+            # If no cores on this qubit, output empty line
+            if not cores_on_qubit:
+                lines.append("-")
+                continue
+
+            # Find start cores (two cases):
+            # 1. Has input from boundary on this qubit
+            # 2. Has no input edge but has output edge on this qubit
+            start_cores = []
+            for core_name in cores_on_qubit:
+                core_info = core_map[core_name]
+                has_in_from_boundary = any(
+                    e['qubit_idx'] == qubit_idx and is_boundary(e['neighbor_name'])
+                    for e in core_info['in_edge_list']
+                )
+                has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
+                has_out_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['out_edge_list'])
+
+                if has_in_from_boundary or (not has_in_edge and has_out_edge):
+                    start_cores.append(core_name)
+
+            # Find end cores (two cases):
+            # 1. Has output to boundary on this qubit
+            # 2. Has input edge but no output edge on this qubit
+            end_cores = []
+            for core_name in cores_on_qubit:
+                core_info = core_map[core_name]
+                has_out_to_boundary = any(
+                    e['qubit_idx'] == qubit_idx and is_boundary(e['neighbor_name'])
+                    for e in core_info['out_edge_list']
+                )
+                has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
+                has_out_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['out_edge_list'])
+
+                if has_out_to_boundary or (has_in_edge and not has_out_edge):
+                    end_cores.append(core_name)
+
+            # Validate start and end cores
+            if len(start_cores) == 0:
+                print(f"WARNING: No start core found on qubit {qubit_idx}")
+                lines.append("-")
+                continue
+            elif len(start_cores) > 1:
+                print(f"WARNING: Multiple start cores found on qubit {qubit_idx}: {start_cores}")
+
+            if len(end_cores) == 0:
+                print(f"WARNING: No end core found on qubit {qubit_idx}")
+                lines.append("-")
+                continue
+            elif len(end_cores) > 1:
+                print(f"WARNING: Multiple end cores found on qubit {qubit_idx}: {end_cores}")
+
+            # Use the first start and end cores
+            start_core = start_cores[0]
+            end_core = end_cores[0]
+
+            # Trace the chain from start to end
             parts = []
-            left_edge = row[0][1] if row else 2
-            parts.append(f"-{left_edge}-")
-            prev_existed = False
-            for i, name in enumerate(self.cores):
-                if name in lt:
-                    if i > 0:
-                        bond = lt[self.cores[i-1]][1] if prev_existed else lt[name][0]
-                        parts.append(f"-{bond}-" if bond > 0 else "---")
-                    parts.append(name)
-                    prev_existed = True
+            current_core = start_core
+
+            # Get left boundary dimension
+            core_info = core_map[current_core]
+            left_dim = None
+            for in_edge in core_info['in_edge_list']:
+                if in_edge['qubit_idx'] == qubit_idx and is_boundary(in_edge['neighbor_name']):
+                    left_dim = in_edge['edge_rank']
+                    break
+
+            if left_dim is not None:
+                parts.append(f"-{left_dim}-")
+            else:
+                parts.append("-")
+
+            # Trace the chain
+            visited = set()
+            while current_core is not None:
+                if current_core in visited:
+                    print(f"WARNING: Circular reference detected on qubit {qubit_idx} at core {current_core}")
+                    break
+                visited.add(current_core)
+
+                parts.append(current_core)
+
+                # If we reached the end core, finish
+                if current_core == end_core:
+                    # Get right boundary dimension
+                    core_info = core_map[current_core]
+                    right_dim = None
+                    for out_edge in core_info['out_edge_list']:
+                        if out_edge['qubit_idx'] == qubit_idx and is_boundary(out_edge['neighbor_name']):
+                            right_dim = out_edge['edge_rank']
+                            break
+
+                    if right_dim is not None:
+                        parts.append(f"-{right_dim}-")
+                    else:
+                        parts.append("-")
+                    break
+
+                # Find next core
+                core_info = core_map[current_core]
+                next_core = None
+                connection_dim = None
+
+                for out_edge in core_info['out_edge_list']:
+                    if out_edge['qubit_idx'] == qubit_idx and not is_boundary(out_edge['neighbor_name']):
+                        next_core = out_edge['neighbor_name']
+                        connection_dim = out_edge['edge_rank']
+                        break
+
+                if next_core is None:
+                    print(f"WARNING: Cannot form chain on qubit {qubit_idx}: {current_core} has no next core but end_core is {end_core}")
+                    break
+
+                # Validate connection
+                next_core_info = core_map[next_core]
+                valid_connection = False
+                for in_edge in next_core_info['in_edge_list']:
+                    if in_edge['qubit_idx'] == qubit_idx and in_edge['neighbor_name'] == current_core:
+                        if in_edge['edge_rank'] != connection_dim:
+                            print(f"WARNING: Dimension mismatch on qubit {qubit_idx} between {current_core} and {next_core}")
+                        valid_connection = True
+                        break
+
+                if not valid_connection:
+                    print(f"WARNING: Invalid connection on qubit {qubit_idx}: {current_core} -> {next_core}")
+
+                # Add connection dimension
+                if connection_dim is not None:
+                    parts.append(f"-{connection_dim}-")
                 else:
-                    if i > 0:
-                        parts.append("---")
                     parts.append("-")
-                    prev_existed = False
-            right_edge = row[-1][2] if row else 2
-            parts.append(f"-{right_edge}-")
+
+                current_core = next_core
+
             lines.append(''.join(parts))
 
         return '\n'.join(lines)

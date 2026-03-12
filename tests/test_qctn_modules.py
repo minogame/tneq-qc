@@ -107,7 +107,7 @@ class TestSmallModuleInit:
         assert mps3.nqubits == 3
 
     def test_mps_ncores_equals_nqubits(self, mps3):
-        assert mps3.ncores == 3
+        assert mps3.ncores == mps3.nqubits - 1
 
     def test_circuit_state_cores_empty_before_init(self, cs3):
         assert cs3.cores_weights == {}
@@ -158,8 +158,8 @@ class TestAppModuleInit:
     def test_plain_mps_named_cores_count(self, backend):
         model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init()
         names = [n for n, _ in model.named_cores()]
-        # mps has 3 cores, prefixed as "mps.A", "mps.B", "mps.C"
-        assert len(names) == 3
+        # staggered MPS has nqubits-1 cores
+        assert len(names) == 2
 
     def test_plain_mps_named_cores_prefixed(self, backend):
         model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init()
@@ -176,8 +176,8 @@ class TestAppModuleInit:
 
     def test_encoding_all_cores_count(self, backend):
         model = Encoding(nqubits=3, bond_dim=4, backend=backend).auto_init()
-        # 3 circuit cores + 3 mps cores = 6
-        assert len(model.all_cores) == 6
+        # 3 circuit cores + 2 mps cores = 5 (staggered MPS)
+        assert len(model.all_cores) == 5
 
     def test_tneq_submodules(self, backend):
         model = TNEQ(nqubits=3, bond_dim=4, backend=backend)
@@ -186,8 +186,8 @@ class TestAppModuleInit:
 
     def test_tneq_all_cores_count(self, backend):
         model = TNEQ(nqubits=3, bond_dim=4, backend=backend).auto_init()
-        # mps1: 3 cores + mps2: 3 cores = 6
-        assert len(model.all_cores) == 6
+        # mps1: 2 cores + mps2: 2 cores = 4 (staggered MPS)
+        assert len(model.all_cores) == 4
 
     def test_quadratic_submodules(self, backend):
         model = Quadratic(nqubits=3, bond_dim=4, backend=backend)
@@ -197,16 +197,16 @@ class TestAppModuleInit:
 
     def test_quadratic_all_cores_count(self, backend):
         model = Quadratic(nqubits=3, bond_dim=4, backend=backend).auto_init()
-        # circuit: 3 + mps: 3 + mx: 3 = 9
-        assert len(model.all_cores) == 9
+        # circuit: 3 + mps: 2 + mx: 3 = 8 (staggered MPS)
+        assert len(model.all_cores) == 8
 
     def test_auto_init_chain_propagates(self, backend):
         """auto_init on parent should init all submodules."""
         model = TNEQ(nqubits=2, bond_dim=3, backend=backend)
         assert model._submodules["mps1"].cores_weights == {}
         model.auto_init()
-        assert len(model._submodules["mps1"].cores_weights) == 2
-        assert len(model._submodules["mps2"].cores_weights) == 2
+        assert len(model._submodules["mps1"].cores_weights) == 1
+        assert len(model._submodules["mps2"].cores_weights) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +227,14 @@ class TestComposition:
         assert len(container.all_cores) == len(encoding.all_cores)
 
     def test_manual_quadratic_composition(self, backend):
-        """Assembling circuit+mps+mx manually should give 9 cores for nqubits=3."""
+        """Assembling circuit+mps+mx manually should give 8 cores for nqubits=3."""
         nq = 3
         container = QCTN(graph=None, backend=backend)
         container.register_module("circuit", CircuitState(nq, 2, backend))
         container.register_module("mps", MPS(nq, 4, 2, backend))
         container.register_module("mx", MeasureMatrix(nq, 2, backend))
         container.auto_init()
-        assert len(container.all_cores) == 9
+        assert len(container.all_cores) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -471,11 +471,11 @@ class TestComplexChunkConcat:
 
     # 5. CS + MPS + MX + MX转置 + CS转置 concat
     def test_full_chain_concat(self, backend):
-        cs  = CircuitState(nqubits=5, phys_dim=2, backend=backend).auto_init()
-        mps = MPS(nqubits=5, bond_dim=4, phys_dim=2, backend=backend).auto_init()
-        mx  = MeasureMatrix(nqubits=5, phys_dim=2, backend=backend).auto_init()
-        mxT = MeasureMatrix(nqubits=5, phys_dim=2, backend=backend).auto_init()
-        csT = CircuitState(nqubits=5, phys_dim=2, backend=backend).auto_init()
+        cs  = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        mps = MPS(nqubits=5, bond_dim=3, phys_dim=3, backend=backend).auto_init()
+        mx  = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        mxT = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        csT = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
 
         # cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
         # mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
@@ -490,3 +490,61 @@ class TestComplexChunkConcat:
         print(f"[full_chain] csT:\n{csT}")
         print(f"[full_chain] merged:\n{merged}")
         assert merged.ncores == cs.ncores + mps.ncores + mx.ncores + mxT.ncores + csT.ncores
+
+
+# ---------------------------------------------------------------------------
+# H. Graph print parity check (raw graph -> QCTN)
+# ---------------------------------------------------------------------------
+
+class TestGraphGeneratorsInQCTNModules:
+    """Print all example graphs, then print QCTN built from each graph."""
+
+    def test_print_all_graphs_and_qctn(self, backend):
+        n = 5
+        graph_specs = [
+            ("mps", "2"),
+            ("tree", "2"),
+            ("wall", "2"),
+            ("circuit", "2"),
+            ("mx", "2"),
+        ]
+
+        for graph_type, dim_char in graph_specs:
+            graph = QCTNHelper.generate_example_graph(
+                n=n, graph_type=graph_type, dim_char=dim_char
+            )
+            print(f"\n[{graph_type}, n={n}] raw graph:\n{graph}")
+
+            qctn = QCTN(graph, backend=backend)
+            print(f"[{graph_type}, n={n}] qctn:\n{qctn}")
+
+            assert qctn.nqubits == n
+
+class TestQuadraticQCTNModules:
+    """Print all example graphs, then print QCTN built from each graph."""
+
+    def test_print_all_graphs_and_qctn(self, backend):
+
+        cs = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        graph = "-2-A-2\n-2-A-2\n"
+        tn = QCTN(graph, backend=backend)
+        
+        n = 2
+        graph_specs = [
+            ("mps", "2"),
+            ("tree", "2"),
+            ("wall", "2"),
+            ("circuit", "2"),
+            ("mx", "2"),
+        ]
+
+        for graph_type, dim_char in graph_specs:
+            graph = QCTNHelper.generate_example_graph(
+                n=n, graph_type=graph_type, dim_char=dim_char
+            )
+            print(f"\n[{graph_type}, n={n}] raw graph:\n{graph}")
+
+            qctn = QCTN(graph, backend=backend)
+            print(f"[{graph_type}, n={n}] qctn:\n{qctn}")
+
+            assert qctn.nqubits == n

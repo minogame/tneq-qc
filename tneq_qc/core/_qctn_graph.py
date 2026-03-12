@@ -98,30 +98,37 @@ class QCTNGraphMixin:
             m_input = input_pattern.match(line)
             m_output = output_pattern.search(line)
 
-            if m_input is None or m_output is None:
+            # Skip lines that have neither input nor output
+            if m_input is None and m_output is None:
                 return
 
-            input_rank, input_core = m_input.groups() if m_input else (0, None)
-            output_core, output_rank = m_output.groups() if m_output else (None, 0)
-            input_rank, output_rank = int(input_rank), int(output_rank)
-            input_core_idx = dict_core2idx[input_core]
-            output_core_idx = dict_core2idx[output_core]
+            # Handle input edge (if present)
+            if m_input:
+                input_rank, input_core = m_input.groups()
+                input_rank = int(input_rank)
+                input_core_idx = dict_core2idx[input_core]
 
-            # Add input edge: from circuit input (-1, "") to input_core
-            self.adjacency_table[input_core_idx]['in_edge_list'].append({
-                'neighbor_idx': -1,
-                'neighbor_name': "",
-                'edge_rank': input_rank,
-                'qubit_idx': qubit_idx
-            })
+                # Add input edge: from circuit input (-1, "") to input_core
+                self.adjacency_table[input_core_idx]['in_edge_list'].append({
+                    'neighbor_idx': -1,
+                    'neighbor_name': "",
+                    'edge_rank': input_rank,
+                    'qubit_idx': qubit_idx
+                })
 
-            # Add output edge: from output_core to circuit output (-1, "")
-            self.adjacency_table[output_core_idx]['out_edge_list'].append({
-                'neighbor_idx': -1,
-                'neighbor_name': "",
-                'edge_rank': output_rank,
-                'qubit_idx': qubit_idx
-            })
+            # Handle output edge (if present)
+            if m_output:
+                output_core, output_rank = m_output.groups()
+                output_rank = int(output_rank)
+                output_core_idx = dict_core2idx[output_core]
+
+                # Add output edge: from output_core to circuit output (-1, "")
+                self.adjacency_table[output_core_idx]['out_edge_list'].append({
+                    'neighbor_idx': -1,
+                    'neighbor_name': "",
+                    'edge_rank': output_rank,
+                    'qubit_idx': qubit_idx
+                })
 
             for match in connect_pattern.finditer(line):
                 end_pos = match.end()

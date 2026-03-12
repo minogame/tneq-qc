@@ -6,6 +6,7 @@ string, then verifies basic structural constraints via QCTN parsing.
 """
 
 import pytest
+import re
 from tneq_qc.utils.graph_generators import QCTNHelper
 from tneq_qc.backends.backend_factory import BackendFactory
 from tneq_qc.core.qctn import QCTN
@@ -123,13 +124,17 @@ class TestMps:
         qctn = _parse(graph, backend)
         assert qctn.nqubits == N
 
-    def test_all_rows_identical(self):
-        """MPS rows must be identical (uniform topology)."""
+    def test_staggered_row_pattern(self):
+        """Staggered MPS: edge rows have one core, middle rows have two."""
         graph = QCTNHelper.mps(nqubits=N, bond_dim=3, phys_dim=2)
         rows = [r for r in graph.strip().splitlines() if r.strip()]
-        assert all(r == rows[0] for r in rows), (
-            "All MPS rows should be the same line"
-        )
+        symbols0 = re.findall(r"[A-Za-z]", rows[0])
+        symbolsn = re.findall(r"[A-Za-z]", rows[-1])
+        assert symbols0 == ["a"]
+        assert symbolsn == ["d"]
+        for i in range(1, N - 1):
+            symbols = re.findall(r"[A-Za-z]", rows[i])
+            assert len(symbols) == 2
 
 
 # ======================================================================

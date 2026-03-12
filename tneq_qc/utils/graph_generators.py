@@ -329,16 +329,19 @@ class QCTNHelper:
 
     @staticmethod
     def mps(nqubits, bond_dim, phys_dim=2):
-        """Generate a uniform MPS graph where all qubits see all cores in a chain.
+        """Generate an MPS graph with the same topology as ``generate_example_graph(..., "mps")``.
 
-        Each qubit line passes through every core, with ``bond_dim`` connecting
-        adjacent cores and ``phys_dim`` as the left/right boundary dimension.
+        Core placement follows the staggered/diagonal layout used by the
+        legacy example-graph generator: the first and last qubit rows have one
+        core, middle rows have two neighboring cores.
 
-        Example — ``mps(3, bond_dim=4, phys_dim=2)``::
+        Example — ``mps(5, bond_dim=4, phys_dim=2)``::
 
-            -2-A-4-B-4-C-2-
-            -2-A-4-B-4-C-2-
-            -2-A-4-B-4-C-2-
+            -2-a-------------------2-
+            -2-a--4--b-------------2-
+            -2-------b--4--c-------2-
+            -2-------------c--4--d-2-
+            -2-------------------d-2-
 
         Args:
             nqubits: Number of qubits (rows in the graph).
@@ -348,12 +351,39 @@ class QCTNHelper:
         Returns:
             str: Graph string suitable for ``QCTN`` construction.
         """
+        if nqubits <= 0:
+            return ""
+        if nqubits == 1:
+            import opt_einsum
+            c = opt_einsum.get_symbol(0)
+            return f"-{phys_dim}-{c}-{phys_dim}-"
+
         import opt_einsum
         char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
         p, b = str(phys_dim), str(bond_dim)
-        inner = f'-{b}-'.join(char_list)
-        line = f'-{p}-{inner}-{p}-'
-        return '\n'.join([line] * nqubits)
+
+        rows = []
+        for i in range(nqubits):
+            cid = i - 1
+            nid = i
+            if i == 0:
+                # First row: only the first core.
+                line = f"-{p}-" + char_list[i] + (nqubits - 2) * 6 * "-" + f"-{p}-"
+            elif i == nqubits - 1:
+                # Last row: only the last core in the staggered chain.
+                line = f"-{p}-" + (nqubits - 2) * 6 * "-" + char_list[cid] + f"-{p}-"
+            else:
+                # Middle rows: two neighboring cores linked by bond_dim.
+                line = f"-{p}-"
+                line += cid * 6 * "-"
+                line += char_list[cid]
+                line += f"--{b}--"
+                line += char_list[nid]
+                line += (nqubits - nid - 2) * 6 * "-"
+                line += f"-{p}-"
+            rows.append(line)
+
+        return "\n".join(rows)
 
     @staticmethod
     def circuit_state(nqubits, phys_dim=2):
