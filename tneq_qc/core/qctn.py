@@ -498,32 +498,60 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         return self.chunk(split_idx)
 
     @staticmethod
-    def concat(qctn1, qctn2):
-        """Left-right merge of two QCTNs into a single new QCTN (static method).
+    def concat(*args):
+        """Left-right merge of multiple QCTNs into a single new QCTN (static method).
 
-        The merged QCTN places *qctn1*'s graph on the left and *qctn2*'s
-        graph on the right, concatenating each qubit line horizontally.
+        The merged QCTN places QCTNs from left to right, concatenating each
+        qubit line horizontally.
 
         Rules:
 
-        1. The resulting number of qubits is ``max(qctn1.nqubits, qctn2.nqubits)``.
-        2. The QCTN with fewer qubits is padded at the bottom with
-           dash-only lines so that both sides have the same number of rows.
-        3. The right boundary (``-dim-`` at end) of *qctn1* and the left
-           boundary (``-dim-`` at start) of *qctn2* overlap – only one
+        1. The resulting number of qubits is ``max(qctn.nqubits for qctn in qctns)``.
+        2. QCTNs with fewer qubits are padded at the bottom with
+           dash-only lines so that all have the same number of rows.
+        3. The right boundary (``-dim-`` at end) of one QCTN and the left
+           boundary (``-dim-`` at start) of the next overlap – only one
            copy is kept.  The boundary from the QCTN that originally has
-           **more qubits** is preserved (if equal, *qctn1*'s is kept).
+           **more qubits** is preserved (if equal, the left one is kept).
         4. Core tensors are renamed contiguously via
            ``opt_einsum.get_symbol(0, 1, 2, …)``.
 
         Args:
-            qctn1 (QCTN): Left QCTN.
-            qctn2 (QCTN): Right QCTN.
+            *args: Either a single list/tuple of QCTNs, or multiple QCTN arguments.
+                The list-based API is recommended: ``QCTN.concat([q1, q2, q3])``
 
         Returns:
             QCTN: A new merged QCTN with renamed cores and copied weights.
+
+        Examples:
+            >>> # Recommended list-based API
+            >>> result = QCTN.concat([q1, q2, q3])
+            >>> # Also accepts multiple arguments
+            >>> result = QCTN.concat(q1, q2, q3)
         """
-        return QCTN._concat_impl(qctn1, qctn2)
+        # Parse arguments
+        if len(args) == 0:
+            raise ValueError("QCTN.concat() requires at least one argument")
+
+        # If first arg is a list/tuple, use it as the list of QCTNs
+        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+            qctns = args[0]
+        else:
+            # Multiple QCTN arguments - treat as list
+            qctns = args
+
+        if len(qctns) == 0:
+            raise ValueError("Cannot concat empty list of QCTNs")
+
+        if len(qctns) == 1:
+            return qctns[0]
+
+        # Sequentially merge from left to right
+        result = qctns[0]
+        for qctn in qctns[1:]:
+            result = QCTN._concat_impl(result, qctn)
+
+        return result
 
     @staticmethod
     def _concat_impl(qctn1, qctn2):
@@ -595,16 +623,16 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
     def merge(qctn1, qctn2):
         """.. deprecated:: Use :meth:`concat` instead."""
         warnings.warn(
-            "QCTN.merge() is deprecated, use QCTN.concat() instead.",
+            "QCTN.merge() is deprecated, use QCTN.concat([qctn1, qctn2]) instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        return QCTN.concat(qctn1, qctn2)
+        return QCTN.concat([qctn1, qctn2])
 
     def concat_with(self, other):
         """Merge *self* with *other* and return a new QCTN.
 
-        Equivalent to ``QCTN.concat(self, other)``.  The result has
+        Equivalent to ``QCTN.concat([self, other])``.  The result has
         *self*'s cores first (preserving relative order), followed by
         *other*'s cores, with all core names reassigned contiguously.
 
@@ -614,7 +642,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         Returns:
             QCTN: A new merged QCTN.
         """
-        return QCTN.concat(self, other)
+        return QCTN.concat([self, other])
 
     def merge_with(self, other):
         """.. deprecated:: Use :meth:`concat_with` instead."""
@@ -653,4 +681,129 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             else:
                 result[name] = TNTensor(tensor).conj_transpose()
         return result
+
+    # ================================================================
+    # Phase 2.6.2: Clone and Hermitian conjugate operations
+    # ================================================================
+
+    def clone(self):
+        """Return a cloned QCTN with independent core tensors.
+
+        Creates a new QCTN with the same structure but with cloned core
+        tensors. Each core tensor is independently trainable and maintains
+        its own gradients during backpropagation.
+
+        Returns:
+            QCTN: New QCTN with cloned cores.
+
+        Example:
+            >>> q1 = QCTN(graph, backend)
+            >>> q2 = q1.clone()
+            >>> # q2 has independent cores, training updates them separately
+        """
+        cloned_qctn = QCTN(graph=None, backend=self.backend, _defer_init=True)
+
+        # Copy structure
+        cloned_qctn.qubits = self.qubits.copy()
+        cloned_qctn.nqubits = self.nqubits
+        cloned_qctn.qubit_indices = self.qubit_indices.copy()
+        cloned_qctn.cores = self.cores.copy()
+        cloned_qctn.ncores = self.ncores
+        cloned_qctn.adjacency_table = [entry.copy() for entry in self.adjacency_table]
+        cloned_qctn.graph = self.graph
+        cloned_qctn.tn_graph = self.tn_graph
+
+        # Clone each core tensor
+        cloned_qctn.cores_weights = {}
+        for core_name, tensor in self.cores_weights.items():
+            if isinstance(tensor, TNTensor):
+                cloned_qctn.cores_weights[core_name] = tensor.clone()
+            else:
+                # Wrap raw tensor first
+                cloned_qctn.cores_weights[core_name] = TNTensor(tensor).clone()
+
+        # Clone submodules
+        cloned_qctn._submodules = {}
+        for name, submodule in self._submodules.items():
+            if hasattr(submodule, 'clone'):
+                cloned_qctn._submodules[name] = submodule.clone()
+            else:
+                cloned_qctn._submodules[name] = submodule
+
+        return cloned_qctn
+
+    def hermit(self):
+        """Return Hermitian conjugate of this QCTN.
+
+        Creates a new QCTN where each core tensor is the Hermitian conjugate
+        (conjugate transpose) of the original. During training, gradients
+        flow back through the hermit transformation automatically via PyTorch's
+        autograd mechanism.
+
+        Returns:
+            QCTN: New QCTN with Hermitian conjugate cores.
+
+        Example:
+            >>> q1 = QCTN(graph, backend)
+            >>> q2 = q1.hermit()
+            >>> # q2's cores are hermitian conjugates of q1's cores
+            >>> # Gradients automatically transform during backprop
+        """
+        hermit_qctn = QCTN(graph=None, backend=self.backend, _defer_init=True)
+
+        # Copy structure
+        hermit_qctn.qubits = self.qubits.copy()
+        hermit_qctn.nqubits = self.nqubits
+        hermit_qctn.qubit_indices = self.qubit_indices.copy()
+        hermit_qctn.cores = self.cores.copy()
+        hermit_qctn.ncores = self.ncores
+        hermit_qctn.graph = self.graph
+        hermit_qctn.tn_graph = self.tn_graph
+
+        # Reverse adjacency_table: swap in_edge_list ↔ out_edge_list for every
+        # core, then recompute the derived shape/dim fields.  This reflects that
+        # Hermitian conjugation reverses all edge directions in the tensor network.
+        hermit_table = []
+        for entry in self.adjacency_table:
+            new_in  = [e.copy() for e in entry['out_edge_list']]
+            new_out = [e.copy() for e in entry['in_edge_list']]
+            input_shape  = [e['edge_rank'] for e in new_in]
+            output_shape = [e['edge_rank'] for e in new_out]
+            in_dim  = 1
+            for r in input_shape:
+                in_dim *= r
+            out_dim = 1
+            for r in output_shape:
+                out_dim *= r
+            hermit_table.append({
+                'core_idx':     entry['core_idx'],
+                'core_name':    entry['core_name'],
+                'in_edge_list':  new_in,
+                'out_edge_list': new_out,
+                'input_shape':   input_shape,
+                'output_shape':  output_shape,
+                'input_dim':  in_dim,
+                'output_dim': out_dim,
+            })
+        hermit_qctn.adjacency_table = hermit_table
+
+        # Apply hermit to each core tensor
+        hermit_qctn.cores_weights = {}
+        for core_name, tensor in self.cores_weights.items():
+            if isinstance(tensor, TNTensor):
+                hermit_qctn.cores_weights[core_name] = tensor.hermit()
+            else:
+                # Wrap raw tensor first
+                hermit_qctn.cores_weights[core_name] = TNTensor(tensor).hermit()
+
+        # Apply hermit to submodules
+        hermit_qctn._submodules = {}
+        for name, submodule in self._submodules.items():
+            if hasattr(submodule, 'hermit'):
+                hermit_qctn._submodules[name] = submodule.hermit()
+            else:
+                hermit_qctn._submodules[name] = submodule
+
+        return hermit_qctn
+
 

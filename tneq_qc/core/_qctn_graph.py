@@ -98,9 +98,9 @@ class QCTNGraphMixin:
             m_input = input_pattern.match(line)
             m_output = output_pattern.search(line)
 
-            # Skip lines that have neither input nor output
-            if m_input is None and m_output is None:
-                return
+            # Note: lines with neither explicit input nor output boundary
+            # (e.g. combined graphs ending with -core-) are still processed
+            # below via connect_pattern for internal core-to-core edges.
 
             # Handle input edge (if present)
             if m_input:

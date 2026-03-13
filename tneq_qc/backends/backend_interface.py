@@ -143,13 +143,14 @@ class ComputeBackend(ABC):
     @abstractmethod
     def convert_to_tensor(self, array):
         """
-        Convert array-like object to backend tensor.
-        
+        Convert array-like object to a TNTensor.
+
         Args:
-            array: Array-like object (numpy array, list, etc.).
-        
+            array: Array-like object (numpy array, list, TNTensor, raw backend tensor, …).
+
         Returns:
-            Backend-specific tensor.
+            TNTensor wrapping the backend tensor.  If *array* is already a
+            TNTensor it is returned unchanged.
         """
         pass
 

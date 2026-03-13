@@ -386,6 +386,68 @@ class QCTNHelper:
         return "\n".join(rows)
 
     @staticmethod
+    def brickwall(nqubits: int, n_layers: int, phys_dim: int = 2) -> str:
+        """Generate a brickwall (alternating-layer) quantum circuit graph.
+
+        Directly follows the ``generate_wall_graph`` layout: adjacent qubit-row
+        pairs share cores in a staggered column pattern, with ``n_layers``
+        controlling the total number of columns (``m = n_layers // 2`` cores
+        per row-pair).
+
+        Example — ``brickwall(4, n_layers=4, phys_dim=2)``::
+
+            -2-a-2-----b-----2-
+            -2-a-2-c-2-b-2-d-2-
+            -2-e-2-c-2-f-2-d-2-
+            -2-e-2-----f-----2-
+
+        Args:
+            nqubits:  Number of qubits (rows).
+            n_layers: Total column width (``L``); ``m = n_layers // 2`` cores
+                      per adjacent-row pair.
+            phys_dim: Physical (boundary) dimension.
+
+        Returns:
+            str: Graph string suitable for ``QCTN`` construction.
+        """
+        import opt_einsum
+
+        dim_char = str(phys_dim)
+        n, L = nqubits, n_layers
+        m = L // 2
+
+        total_chars = L * (n // 2)
+        char_list = [opt_einsum.get_symbol(i) for i in range(total_chars)]
+
+        # 2-D char array: n rows × (4*L) columns, all '-'
+        line_list = [['-'] * (4 * L) for _ in range(n)]
+
+        # 最后一列（右边界 dim）
+        for i in range(n):
+            line_list[i][-2] = dim_char
+
+        idx = 0
+        for i in range(n - 1):
+            offset = 0 if i % 2 == 0 else 4
+            for j in range(m):
+                col = offset + 8 * j
+                # 同一 core 同时出现在第 i 行和第 i+1 行
+                line_list[i][col]     = char_list[idx]
+                line_list[i + 1][col] = char_list[idx]
+                # 行内 bond dim（中间列和末尾列的条件）
+                if j < m - 1 or (j == m - 1 and i > 0):
+                    line_list[i][col + 2] = dim_char
+                if j < m - 1 or (j == m - 1 and i != n - 2):
+                    line_list[i + 1][col + 2] = dim_char
+                idx += 1
+
+        rows = [
+            "-" + dim_char + "-" + "".join(line_list[i])
+            for i in range(n)
+        ]
+        return "\n".join(rows)
+
+    @staticmethod
     def circuit_state(nqubits, phys_dim=2):
         """Generate a circuit-state graph: each qubit has one core, no left input dim.
 
@@ -409,6 +471,33 @@ class QCTNHelper:
         char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
         p = str(phys_dim)
         return '\n'.join(f'-{c}-{p}-' for c in char_list)
+
+    @staticmethod
+    def circuit_bra(nqubits, phys_dim=2):
+        """Generate a circuit-bra graph: each qubit has one core, left input dim only.
+
+        Each qubit line has a single core with only a left (input) edge of
+        ``phys_dim`` and no right (output) edge.  This corresponds to a row
+        vector (bra) state ``⟨ψ|`` that closes the right boundary of the
+        preceding component.
+
+        Example — ``circuit_bra(3, phys_dim=2)``::
+
+            -2-A-
+            -2-B-
+            -2-C-
+
+        Args:
+            nqubits: Number of qubits (one core per qubit).
+            phys_dim: Physical (input) dimension.
+
+        Returns:
+            str: Graph string suitable for ``QCTN`` construction.
+        """
+        import opt_einsum
+        char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
+        p = str(phys_dim)
+        return '\n'.join(f'-{p}-{c}-' for c in char_list)
 
     @staticmethod
     def measure_matrix(nqubits, phys_dim=2):

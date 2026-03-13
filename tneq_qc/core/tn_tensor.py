@@ -34,6 +34,8 @@ class TNTensor:
         is_ref: bool = False,
         is_transposed: bool = False,
         source: Optional["TNTensor"] = None,
+        name: Optional[str] = None,
+        _source_info: Optional[dict] = None,
     ):
         """
         Args:
@@ -43,6 +45,8 @@ class TNTensor:
             is_ref:        True when this tensor is a view/reference of ``source``.
             is_transposed: True when this tensor is the (conjugate-)transpose of ``source``.
             source:        Original TNTensor from which this one was derived.
+            name:          Optional name for debugging and visualization.
+            _source_info:  Optional metadata about the tensor's origin (for debugging).
         """
         self._tensor = tensor
         self.scale = float(scale)
@@ -54,6 +58,8 @@ class TNTensor:
         self.is_ref = is_ref
         self.is_transposed = is_transposed
         self.source = source
+        self.name = name
+        self._source_info = _source_info
 
     # ------------------------------------------------------------------
     # Core mutator
@@ -214,17 +220,93 @@ class TNTensor:
         """Conjugate then transpose (dagger). Marks ``is_transposed=True``."""
         return self.conj().transpose(*dims)
 
-    def clone(self) -> "TNTensor":
-        """Return an independent deep copy (no shared memory)."""
+    def clone(self, deep: bool = True) -> "TNTensor":
+        """Return a cloned TNTensor.
+
+        Args:
+            deep: If True, creates a deep copy of the data while maintaining
+                  the computation graph for gradient flow. If False, detaches
+                  from the computation graph before cloning.
+
+        Returns:
+            New TNTensor with cloned data.
+        """
         raw = self._tensor
         if hasattr(raw, "clone"):
-            raw_copy = raw.clone()
+            # PyTorch: clone() maintains computation graph
+            if deep:
+                raw_copy = raw.clone()
+            else:
+                raw_copy = raw.detach().clone()
         elif hasattr(raw, "copy"):
             raw_copy = raw.copy()
         else:
             import numpy as np
             raw_copy = np.array(raw)
-        return TNTensor(raw_copy, scale=self.scale, log_scale=self.log_scale)
+
+        return TNTensor(
+            raw_copy,
+            scale=self.scale,
+            log_scale=self.log_scale,
+            name=f"{self.name}_clone" if self.name else None,
+            _source_info={'type': 'clone', 'base': self.name, 'deep': deep}
+        )
+
+    def hermit(self, axes=None) -> "TNTensor":
+        """Return Hermitian conjugate (conjugate transpose) of this TNTensor.
+
+        For quantum circuit tensors, this applies:
+        1. Complex conjugate
+        2. Transpose (permute) specified axes
+
+        Args:
+            axes: Permutation order for transpose. If None, defaults to
+                  transposing the last two dimensions (typically physical dims).
+
+        Returns:
+            New TNTensor with Hermitian conjugate data. PyTorch's autograd
+            automatically handles gradient transformation during backprop.
+
+        Example:
+            For a tensor with shape (bond_left, phys_in, phys_out, bond_right),
+            hermit() with default axes will swap phys_in and phys_out.
+        """
+        if axes is None:
+            # Default: transpose last two dimensions (usually physical dims)
+            axes = list(range(self.ndim))
+            if len(axes) >= 2:
+                axes[-2], axes[-1] = axes[-1], axes[-2]
+
+        # Apply conjugate and permute
+        raw = self._tensor
+        if hasattr(raw, "conj"):
+            hermit_data = raw.conj()
+        elif hasattr(raw, "conjugate"):
+            hermit_data = raw.conjugate()
+        else:
+            hermit_data = raw  # Real tensor - conjugate is no-op
+
+        # Apply permutation
+        if hasattr(hermit_data, "permute"):
+            hermit_data = hermit_data.permute(*axes)
+        else:
+            try:
+                import jax.numpy as jnp
+                hermit_data = jnp.transpose(hermit_data, axes)
+            except ImportError:
+                import numpy as np
+                hermit_data = np.transpose(hermit_data, axes)
+
+        return TNTensor(
+            hermit_data,
+            scale=self.scale,
+            log_scale=self.log_scale,
+            is_ref=True,
+            is_transposed=True,
+            source=self,
+            name=f"{self.name}_H" if self.name else None,
+            _source_info={'type': 'hermit', 'base': self.name, 'axes': axes}
+        )
 
     def to(self, device=None, dtype=None) -> "TNTensor":
         """Move / cast the underlying tensor; returns a new TNTensor.
@@ -273,20 +355,28 @@ class TNTensor:
         return TNTensor(result, scale=self.scale * other.scale)
 
     def __mul__(self, other) -> "TNTensor":
-        """Element-wise multiply by scalar or another TNTensor."""
+        """Element-wise multiply by scalar, raw tensor, or another TNTensor."""
         if isinstance(other, TNTensor):
             raw = self._tensor * other._tensor
             return TNTensor(raw, scale=self.scale * other.scale)
+        # Raw backend tensor (torch.Tensor, jnp.ndarray, …)
+        if hasattr(other, 'shape'):
+            return TNTensor(self._tensor * other, scale=self.scale)
+        # Python scalar
         return TNTensor(self._tensor, scale=self.scale * float(other))
 
     def __rmul__(self, other) -> "TNTensor":
         return self.__mul__(other)
 
     def __truediv__(self, other) -> "TNTensor":
-        """Element-wise divide by scalar or another TNTensor."""
+        """Element-wise divide by scalar, raw tensor, or another TNTensor."""
         if isinstance(other, TNTensor):
             raw = self._tensor / other._tensor
             return TNTensor(raw, scale=self.scale / other.scale)
+        # Raw backend tensor
+        if hasattr(other, 'shape'):
+            return TNTensor(self._tensor / other, scale=self.scale)
+        # Python scalar
         factor = float(other)
         if factor == 0:
             raise ZeroDivisionError

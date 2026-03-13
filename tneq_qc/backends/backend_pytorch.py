@@ -111,6 +111,7 @@ class BackendPyTorch(ComputeBackend):
         Returns a function that computes loss and gradients for specified arguments.
         """
         def value_and_grad_fn(*args):
+            from ..core.tn_tensor import TNTensor
             # Convert argnums to list if it's a range
             if isinstance(argnums, range):
                 arg_indices = list(argnums)
@@ -119,9 +120,17 @@ class BackendPyTorch(ComputeBackend):
             else:
                 arg_indices = [argnums]
 
-            # Compute loss
+            # Compute loss (may be TNTensor)
             loss = loss_fn(*args)
-            
+
+            # Convert TNTensor loss to raw torch tensor (effective value)
+            if isinstance(loss, TNTensor):
+                loss = loss.tensor * loss.scale
+
+            # Autograd requires a real scalar; take real part if complex
+            if self.torch.is_complex(loss):
+                loss = loss.real
+
             if loss.ndim > 0:
                 loss = loss.sum()
 
@@ -150,23 +159,22 @@ class BackendPyTorch(ComputeBackend):
         return func
 
     def convert_to_tensor(self, array):
-        """Convert to PyTorch tensor."""
+        """Convert to TNTensor wrapping a PyTorch tensor."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(array, TNTensor):
+            return array
         if isinstance(array, self.torch.Tensor):
-            # Move to correct device / dtype if needed
             target = array
             if str(target.device) != self.backend_info.device:
                 target = target.to(self.backend_info.device)
             if target.dtype != self.default_dtype:
                 target = target.to(self.default_dtype)
-            return target
-        
-        # Convert array to tensor based on backend_info
+            return TNTensor(target)
+
         if not isinstance(array, np.ndarray):
             array = np.array(array)
-        
-        # 使用默认 dtype 创建 tensor
         tensor = self.torch.as_tensor(array, dtype=self.default_dtype)
-        return tensor.to(self.backend_info.device)
+        return TNTensor(tensor.to(self.backend_info.device))
 
     def get_backend_name(self) -> str:
         return "pytorch"
@@ -227,22 +235,15 @@ class BackendPyTorch(ComputeBackend):
             
             for i, (is_tn, scale, tn_class) in enumerate(is_tntensor_info):
                 if is_tn:
-                    # new_raw_params[i] *= scale
-
-                    # params[i] = tn_class(new_raw_params[i] / scale, scale)
-                    # params[i] = tn_class(new_raw_params[i])
-
-                    # params[i] = tn_class(new_raw_params[i], 1.0)
-                    # params[i].scale_to(scale)
-                    # params[i].auto_scale()
-
-                    params[i].set(new_raw_params[i] / scale, scale)
-                    params[i].tensor.requires_grad_(True)
-                    # params[i].tensor.grad.zero_()
+                    # In-place storage update: keeps the same tensor *object* so
+                    # that any views derived from it (e.g. hermit conj/permute
+                    # views stored in mps_h) automatically see the new values.
+                    # set() would replace _tensor with a new object, breaking those views.
+                    params[i].tensor.data.copy_(new_raw_params[i] / scale)
+                    # params[i].tensor.requires_grad_(True)
                 else:
-                    # params[i] = new_raw_params[i]
-                    params[i].data = new_raw_params[i].data
-                    params[i].requires_grad_(True)
+                    params[i].data.copy_(new_raw_params[i])
+                    # params[i].requires_grad_(True)
                     
             return params, new_state
 
@@ -448,12 +449,12 @@ class BackendPyTorch(ComputeBackend):
 
     def init_random_core(self, shape):
         """Initialize random core using QR decomposition for orthogonality."""
+        from ..core.tn_tensor import TNTensor
         flat_dim = int(np.prod(shape[:len(shape)//2]))
-        
+
         random_matrix = self.torch.randn(
             (flat_dim, flat_dim),
-            device=self.backend_info.device,    
-            # dtype=self.default_dtype if not self.torch.is_complex(self.torch.zeros(1, dtype=self.default_dtype)) else self.torch.float32,
+            device=self.backend_info.device,
             dtype=self.default_dtype,
         )
         Q, R = self.torch.linalg.qr(random_matrix)
@@ -461,17 +462,14 @@ class BackendPyTorch(ComputeBackend):
         if self.is_complex(d):
             phases = d / (d.abs() + 1e-12)
             sign_correction = self.torch.diag(phases.conj())
-            # sign_correction = phases.conj()
             Q = Q @ sign_correction
         else:
             sign_correction = self.torch.sign(d)
             Q = Q * sign_correction.unsqueeze(0)
-        
 
-        # 如果默认 dtype 是复数，则将实数正交矩阵提升到复数 dtype
         if self.is_complex(self.torch.zeros(1, dtype=self.default_dtype)):
             Q = Q.to(self.default_dtype)
-        return self.wrap_tensor(Q.reshape(shape))
+        return TNTensor(Q.reshape(shape))
 
     def _get_raw_tensor_type(self):
         return self.torch.Tensor
@@ -486,118 +484,187 @@ class BackendPyTorch(ComputeBackend):
         random.seed(seed)
 
     def tensor_to_numpy(self, tensor):
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            tensor = tensor.tensor
         if not isinstance(tensor, self.torch.Tensor):
             tensor = self.torch.as_tensor(tensor)
         return tensor.detach().cpu().numpy()
 
     def reshape(self, tensor, shape):
         """Reshape tensor to the given shape."""
-        tensor = self.unwrap_tensor(tensor)
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return tensor.reshape(shape)
         return tensor.reshape(shape)
 
     def eye(self, n: int, dtype=None):
         """Create an identity matrix of size n x n."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return self.torch.eye(n, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.eye(n, dtype=dtype, device=self.backend_info.device))
 
     def zeros(self, shape, dtype=None):
         """Create a tensor filled with zeros."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return self.torch.zeros(shape, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.zeros(shape, dtype=dtype, device=self.backend_info.device))
 
     def ones(self, shape, dtype=None):
         """Create a tensor filled with ones."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return self.torch.ones(shape, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.ones(shape, dtype=dtype, device=self.backend_info.device))
 
     def clone(self, tensor):
         """Create a copy of the tensor."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(tensor.tensor.clone(), scale=tensor.scale)
         return tensor.clone()
 
     def unsqueeze(self, tensor, dim):
         """Add a dimension of size 1 at the specified position."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(tensor.tensor.unsqueeze(dim), scale=tensor.scale)
         return tensor.unsqueeze(dim)
 
     def expand(self, tensor, *sizes):
         """Expand tensor to a larger size by broadcasting."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(tensor.tensor.expand(*sizes), scale=tensor.scale)
         return tensor.expand(*sizes)
 
     def clamp(self, tensor, min=None, max=None):
         """Clamp tensor values to a range.
 
         PyTorch 不支持对 complex 张量直接 clamp，这里只对实部做裁剪，
-        虚部保持不变，满足本项目中“概率/密度在实部非负”的需求。
+        虚部保持不变，满足本项目中"概率/密度在实部非负"的需求。
         """
-        if self.is_complex(tensor):
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            raw = tensor.tensor * tensor.scale
+            if self.torch.is_complex(raw):
+                r = self.torch.clamp(self.torch.real(raw), min=min, max=max)
+                return TNTensor(self.torch.complex(r, self.torch.imag(raw)))
+            return TNTensor(self.torch.clamp(raw, min=min, max=max))
+        if self.torch.is_complex(tensor):
             real = self.torch.real(tensor)
             imag = self.torch.imag(tensor)
-            real_clamped = self.torch.clamp(real, min=min, max=max)
-            return self.torch.complex(real_clamped, imag)
+            return self.torch.complex(self.torch.clamp(real, min=min, max=max), imag)
         return self.torch.clamp(tensor, min=min, max=max)
-
     def diagonal(self, tensor, dim1=-2, dim2=-1):
         """Extract diagonal from a tensor."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.diagonal(tensor.tensor, dim1=dim1, dim2=dim2), scale=tensor.scale)
         return self.torch.diagonal(tensor, dim1=dim1, dim2=dim2)
 
     def sum(self, tensor, dim=None, keepdim=False):
         """Sum tensor elements along specified dimension(s)."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.sum(tensor.tensor, dim=dim, keepdim=keepdim), scale=tensor.scale)
         return self.torch.sum(tensor, dim=dim, keepdim=keepdim)
 
     def multinomial(self, probs, num_samples):
         """Sample from multinomial distribution."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(probs, TNTensor):
+            probs = probs.tensor * probs.scale
         return self.torch.multinomial(probs, num_samples=num_samples)
 
     def arange(self, *args, dtype=None):
         """Create a 1-D tensor with evenly spaced values."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.torch.long
-        return self.torch.arange(*args, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.arange(*args, dtype=dtype, device=self.backend_info.device))
 
     def stack(self, tensors, dim=0):
         """Stack tensors along a new dimension."""
+        from ..core.tn_tensor import TNTensor
+        if tensors and isinstance(tensors[0], TNTensor):
+            scales = [t.scale for t in tensors if isinstance(t, TNTensor)]
+            raw = [t.tensor if isinstance(t, TNTensor) else t for t in tensors]
+            if len(set(scales)) == 1:
+                return TNTensor(self.torch.stack(raw, dim=dim), scale=scales[0])
+            effective = [t.tensor * t.scale if isinstance(t, TNTensor) else t for t in tensors]
+            return TNTensor(self.torch.stack(effective, dim=dim))
         return self.torch.stack(tensors, dim=dim)
 
     def log(self, tensor):
         """Compute natural logarithm element-wise."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.log(tensor.tensor * tensor.scale))
         return self.torch.log(tensor)
 
     def mean(self, tensor, dim=None, keepdim=False):
         """Compute mean of tensor elements."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.mean(tensor.tensor, dim=dim, keepdim=keepdim), scale=tensor.scale)
         return self.torch.mean(tensor, dim=dim, keepdim=keepdim)
 
     def squeeze(self, tensor, dim=None):
         """Remove dimensions of size 1."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            raw = tensor.tensor.squeeze() if dim is None else tensor.tensor.squeeze(dim)
+            return TNTensor(raw, scale=tensor.scale)
         if dim is None:
             return tensor.squeeze()
         return tensor.squeeze(dim)
 
     def detach(self, tensor):
         """Detach tensor from computation graph."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(tensor.tensor.detach(), scale=tensor.scale)
         if hasattr(tensor, 'detach'):
             return tensor.detach()
         return tensor
 
     def lgamma(self, tensor):
         """Compute log-gamma function element-wise."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.lgamma(tensor.tensor * tensor.scale))
         return self.torch.lgamma(tensor)
 
     def exp(self, tensor):
         """Compute exponential function element-wise."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.exp(tensor.tensor * tensor.scale))
         return self.torch.exp(tensor)
 
     def sqrt(self, tensor):
         """Compute square root element-wise."""
+        import math
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.sqrt(tensor.tensor), scale=math.sqrt(abs(tensor.scale)))
         return self.torch.sqrt(tensor)
 
     def square(self, tensor):
         """Compute square element-wise."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.square(tensor.tensor), scale=tensor.scale ** 2)
         return self.torch.square(tensor)
 
     def permute(self, tensor, dims):
         """Permute tensor dimensions."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(tensor.tensor.permute(dims), scale=tensor.scale)
         return tensor.permute(dims)
 
     def einsum(self, equation, *operands):
@@ -607,31 +674,42 @@ class BackendPyTorch(ComputeBackend):
 
     def ones_like(self, tensor):
         """Create a tensor of ones with same shape and type as input."""
-        return self.torch.ones_like(tensor)
+        from ..core.tn_tensor import TNTensor
+        raw = self.unwrap_tensor(tensor)
+        return TNTensor(self.torch.ones_like(raw))
 
     def linspace(self, start, end, steps, dtype=None):
         """Create a 1-D tensor of size steps with values linearly spaced in range [start, end]."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return self.torch.linspace(start, end, steps, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.linspace(start, end, steps, dtype=dtype, device=self.backend_info.device))
 
     def cumsum(self, tensor, dim, dtype=None):
         """Returns the cumulative sum of elements of input in the dimension dim."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.cumsum(tensor.tensor, dim=dim, dtype=dtype), scale=tensor.scale)
         return self.torch.cumsum(tensor, dim=dim, dtype=dtype)
 
     def rand(self, size, dtype=None):
         """Returns a tensor filled with random numbers from a uniform distribution on the interval [0, 1)."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return self.torch.rand(size, dtype=dtype, device=self.backend_info.device)
+        return TNTensor(self.torch.rand(size, dtype=dtype, device=self.backend_info.device))
 
     def real(self, tensor):
         """Returns the real part of the tensor."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.torch.real(tensor.tensor), scale=tensor.scale)
         return self.torch.real(tensor)
 
     def is_complex(self, tensor) -> bool:
         """Return True if tensor is complex dtype."""
-        if self.use_tn_tensor:
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
             return self.torch.is_complex(tensor.tensor)
         return self.torch.is_complex(tensor)
 
@@ -644,4 +722,11 @@ class BackendPyTorch(ComputeBackend):
 
     def gather(self, input, dim, index):
         """Gathers values along an axis specified by dim."""
-        return self.torch.gather(input, dim, index)
+        from ..core.tn_tensor import TNTensor
+        scale = 1.0
+        if isinstance(input, TNTensor):
+            scale = input.scale
+            input = input.tensor
+        if isinstance(index, TNTensor):
+            index = index.tensor.long()
+        return TNTensor(self.torch.gather(input, dim, index), scale=scale)
