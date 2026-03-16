@@ -124,8 +124,8 @@ def main():
     parser.add_argument(
         "--num-qubits",
         type=int,
-        default=16,
-        help="量子比特数量（默认 16）。",
+        default=2,
+        help="量子比特数量（默认 2",
     )
     parser.add_argument(
         "--dim-char",
@@ -156,8 +156,8 @@ def main():
     parser.add_argument(
         "--K",
         type=int,
-        default=3,
-        help="每个 qubit 的局域维度 K（默认 3）。",
+        default=2,
+        help="每个 qubit 的局域维度 K（默认 2）。",
     )
 
     args = parser.parse_args()
@@ -191,6 +191,13 @@ def main():
 
     qctn = QCTN(graph, backend=backend)
     print(f"QCTN: nqubits = {qctn.nqubits}, ncores = {qctn.ncores}")
+    for c_name in qctn.cores:
+        core_tensor = qctn.cores_weights[c_name]
+        if isinstance(core_tensor, torch.Tensor):
+            core_tensor.requires_grad_(True)
+        else:
+            core_tensor.tensor.requires_grad_(True)
+    
 
     # ------------------------------------------------------------------
     # 3. 准备训练数据与电路输入态

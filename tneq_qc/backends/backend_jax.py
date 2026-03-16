@@ -112,21 +112,20 @@ class BackendJAX(ComputeBackend):
         return self.jax.jit(func)
 
     def convert_to_tensor(self, array):
-        """Convert to JAX array."""
-        if isinstance(array, self.jnp.ndarray):
-            # JAX 里 dtype 不强制转换，保持原有 dtype；如果需要可以在外层手动 cast
+        """Convert to TNTensor wrapping a JAX array."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(array, TNTensor):
             return array
-        
-        # Convert based on backend_info
-        tensor = self.jnp.array(array, dtype=self.default_dtype)
-        
-        # Device placement if GPU
+
+        if not isinstance(array, self.jnp.ndarray):
+            array = self.jnp.array(array, dtype=self.default_dtype)
+
         if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
             devices = self.jax.devices('gpu')
             if devices:
-                tensor = self.jax.device_put(tensor, devices[0])
-        
-        return tensor
+                array = self.jax.device_put(array, devices[0])
+
+        return TNTensor(array)
 
     def get_backend_name(self) -> str:
         return "jax"
@@ -195,17 +194,16 @@ class BackendJAX(ComputeBackend):
         return new_params, state
 
     def init_random_core(self, shape):
+        from ..core.tn_tensor import TNTensor
         flat_dim = int(np.prod(shape[:len(shape)//2]))
-        
-        # Split key
+
         self.key, subkey = self.jax.random.split(self.key)
-        
         random_matrix = self.jax.random.normal(subkey, (flat_dim, flat_dim))
         Q, R = self.jnp.linalg.qr(random_matrix)
         d = self.jnp.diag(R)
         sign_correction = self.jnp.sign(d)
-        Q = Q * sign_correction[None, :] # unsqueeze(0) equivalent
-        return self.wrap_tensor(Q.reshape(shape))
+        Q = Q * sign_correction[None, :]
+        return TNTensor(Q.reshape(shape))
 
     def _get_raw_tensor_type(self):
         return self.jnp.ndarray
@@ -215,76 +213,84 @@ class BackendJAX(ComputeBackend):
         np.random.seed(seed)
 
     def tensor_to_numpy(self, tensor):
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            tensor = tensor.tensor
         return np.asarray(tensor)
 
     def reshape(self, tensor, shape):
         """Reshape tensor to the given shape."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return tensor.reshape(shape)
         return self.jnp.reshape(tensor, shape)
+
+    def _gpu_put(self, tensor):
+        """Move tensor to GPU if configured."""
+        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
+            devices = self.jax.devices('gpu')
+            if devices:
+                return self.jax.device_put(tensor, devices[0])
+        return tensor
 
     def eye(self, n: int, dtype=None):
         """Create an identity matrix of size n x n."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        
-        tensor = self.jnp.eye(n, dtype=dtype)
-        
-        # Device placement if GPU
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                tensor = self.jax.device_put(tensor, devices[0])
-                
-        return tensor
+        return TNTensor(self._gpu_put(self.jnp.eye(n, dtype=dtype)))
 
     def zeros(self, shape, dtype=None):
         """Create a tensor filled with zeros."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        
-        tensor = self.jnp.zeros(shape, dtype=dtype)
-        
-        # Device placement if GPU
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                tensor = self.jax.device_put(tensor, devices[0])
-                
-        return tensor
+        return TNTensor(self._gpu_put(self.jnp.zeros(shape, dtype=dtype)))
 
     def ones(self, shape, dtype=None):
         """Create a tensor filled with ones."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        
-        tensor = self.jnp.ones(shape, dtype=dtype)
-        
-        # Device placement if GPU
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                tensor = self.jax.device_put(tensor, devices[0])
-                
-        return tensor
+        return TNTensor(self._gpu_put(self.jnp.ones(shape, dtype=dtype)))
 
     def clone(self, tensor):
         """Create a copy of the tensor."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.copy(tensor.tensor), scale=tensor.scale)
         return self.jnp.copy(tensor)
 
     def unsqueeze(self, tensor, dim):
         """Add a dimension of size 1 at the specified position."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.expand_dims(tensor.tensor, axis=dim), scale=tensor.scale)
         return self.jnp.expand_dims(tensor, axis=dim)
 
     def expand(self, tensor, *sizes):
         """Expand tensor to a larger size by broadcasting."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.broadcast_to(tensor.tensor, sizes), scale=tensor.scale)
         return self.jnp.broadcast_to(tensor, sizes)
 
     def clamp(self, tensor, min=None, max=None):
         """Clamp tensor values to a range."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.clip(tensor.tensor * tensor.scale, a_min=min, a_max=max))
         return self.jnp.clip(tensor, a_min=min, a_max=max)
 
     def diagonal(self, tensor, dim1=-2, dim2=-1):
         """Extract diagonal from a tensor."""
-        # JAX diagonal is a bit different, need to handle axes
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            raw = tensor.tensor
+            ndim = raw.ndim
+            axis1 = dim1 if dim1 >= 0 else ndim + dim1
+            axis2 = dim2 if dim2 >= 0 else ndim + dim2
+            return TNTensor(self.jnp.diagonal(raw, axis1=axis1, axis2=axis2), scale=tensor.scale)
         ndim = tensor.ndim
         axis1 = dim1 if dim1 >= 0 else ndim + dim1
         axis2 = dim2 if dim2 >= 0 else ndim + dim2
@@ -292,16 +298,19 @@ class BackendJAX(ComputeBackend):
 
     def sum(self, tensor, dim=None, keepdim=False):
         """Sum tensor elements along specified dimension(s)."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.sum(tensor.tensor, axis=dim, keepdims=keepdim), scale=tensor.scale)
         return self.jnp.sum(tensor, axis=dim, keepdims=keepdim)
 
     def multinomial(self, probs, num_samples):
         """Sample from multinomial distribution."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(probs, TNTensor):
+            probs = probs.tensor * probs.scale
         # Split key for random sampling
         self.key, subkey = self.jax.random.split(self.key)
-        
-        # JAX's categorical sampler expects shape (batch_size,) for probs
-        # and returns samples of shape (batch_size,) when num_samples=1
-        # For consistency with PyTorch, we need to handle this
+
         batch_shape = probs.shape[:-1]
         num_categories = probs.shape[-1]
         
@@ -328,37 +337,48 @@ class BackendJAX(ComputeBackend):
 
     def arange(self, *args, dtype=None):
         """Create a 1-D tensor with evenly spaced values."""
+        from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.jnp.int32
-        
-        tensor = self.jnp.arange(*args, dtype=dtype)
-        
-        # Device placement if GPU
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                tensor = self.jax.device_put(tensor, devices[0])
-                
-        return tensor
+        return TNTensor(self._gpu_put(self.jnp.arange(*args, dtype=dtype)))
 
     def stack(self, tensors, dim=0):
         """Stack tensors along a new dimension."""
+        from ..core.tn_tensor import TNTensor
+        if tensors and isinstance(tensors[0], TNTensor):
+            scales = [t.scale for t in tensors if isinstance(t, TNTensor)]
+            raw = [t.tensor if isinstance(t, TNTensor) else t for t in tensors]
+            if len(set(scales)) == 1:
+                return TNTensor(self.jnp.stack(raw, axis=dim), scale=scales[0])
+            effective = [t.tensor * t.scale if isinstance(t, TNTensor) else t for t in tensors]
+            return TNTensor(self.jnp.stack(effective, axis=dim))
         return self.jnp.stack(tensors, axis=dim)
 
     def log(self, tensor):
         """Compute natural logarithm element-wise."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.log(tensor.tensor * tensor.scale))
         return self.jnp.log(tensor)
 
     def mean(self, tensor, dim=None, keepdim=False):
         """Compute mean of tensor elements."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jnp.mean(tensor.tensor, axis=dim, keepdims=keepdim), scale=tensor.scale)
         return self.jnp.mean(tensor, axis=dim, keepdims=keepdim)
 
     def squeeze(self, tensor, dim=None):
         """Remove dimensions of size 1."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            raw = self.jnp.squeeze(tensor.tensor) if dim is None else self.jnp.squeeze(tensor.tensor, axis=dim)
+            return TNTensor(raw, scale=tensor.scale)
         if dim is None:
             return self.jnp.squeeze(tensor)
         return self.jnp.squeeze(tensor, axis=dim)
 
     def einsum(self, equation, *operands):
         """Perform Einstein summation convention contraction."""
-        return self.jnp.einsum(equation, *operands)
+        raw_ops = [self.unwrap_tensor(op) for op in operands]
+        return self.jnp.einsum(equation, *raw_ops)

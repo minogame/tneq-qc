@@ -1,7 +1,7 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-net_name=tofu1
+net_name=eno1
 
 # MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_ADDR=`ip -o -4 addr list ${net_name} | awk '{print $4}' | cut -d/ -f1`

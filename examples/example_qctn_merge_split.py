@@ -148,6 +148,48 @@ def main():
     print(f"nqubits={merged_tree_wall.nqubits}, ncores={merged_tree_wall.ncores}")
     print(merged_tree_wall.graph)
 
+    # ------------------------------------------------------------------
+    # 5. 三种结构 (MPS / Wall-circuit / Tree-mx) 各 5 qubits 按顺序 merge
+    # ------------------------------------------------------------------
+    n5 = 5
+
+    graph_mps5 = QCTNHelper.generate_example_graph(n=n5, graph_type="mps", dim_char="3")
+    graph_circuit5 = QCTNHelper.generate_example_graph(n=n5, graph_type="circuit", dim_char="3")
+    graph_mx5 = QCTNHelper.generate_example_graph(n=n5, graph_type="mx", dim_char="3")
+
+    qctn_mps5 = QCTN(graph_mps5, backend=backend)
+    qctn_circuit5 = QCTN(graph_circuit5, backend=backend)
+    qctn_mx5 = QCTN(graph_mx5, backend=backend)
+
+    print("\n" + "=" * 60)
+    print("Step 5: Sequential merge of MPS → Circuit → Mx")
+    print("         All 5 qubits")
+    print("=" * 60)
+
+    print(f"\n[MPS]     nqubits={qctn_mps5.nqubits}, ncores={qctn_mps5.ncores}")
+    print(graph_mps5)
+
+    print(f"[Circuit] nqubits={qctn_circuit5.nqubits}, ncores={qctn_circuit5.ncores}")
+    print(graph_circuit5)
+
+    print(f"[Mx]      nqubits={qctn_mx5.nqubits}, ncores={qctn_mx5.ncores}")
+    print(graph_mx5)
+
+    # Step A: merge MPS + Circuit
+    merged_step1 = QCTN.merge(qctn_circuit5, qctn_mps5)
+    print(f"\n--- Merge(MPS, Circuit) ---")
+    print(f"nqubits={merged_step1.nqubits}, ncores={merged_step1.ncores}")
+    print(merged_step1.graph)
+
+    # Step B: merge (MPS+Circuit) + Mx
+    merged_step2 = QCTN.merge(merged_step1, qctn_mx5)
+    print(f"\n--- Merge(MPS+Circuit, Mx) ---")
+    print(f"nqubits={merged_step2.nqubits}, ncores={merged_step2.ncores}")
+    print(merged_step2.graph)
+
+
+
+
 
 if __name__ == "__main__":
     main()
