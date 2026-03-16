@@ -236,6 +236,13 @@ class QCTNIOMixin:
                 tensor_dict[f"core_{core_name}"] = np.ascontiguousarray(arr)
 
         metadata_dict = {} if metadata is None else {str(k): str(v) for k, v in metadata.items()}
+
+        # Persist core_names mapping so load_cores can restore it.
+        core_names = getattr(self, 'core_names', {})
+        if core_names:
+            import json
+            metadata_dict['_core_names'] = json.dumps(core_names)
+
         save_file(tensor_dict, str(file_path), metadata=metadata_dict)
 
     def load_cores(self, file_path: Union[str, Path], strict: bool = True) -> Mapping[str, str]:
@@ -245,17 +252,23 @@ class QCTNIOMixin:
 
         try:
             from safetensors.numpy import load_file
+            from safetensors import safe_open
         except ImportError as exc:
             raise ImportError(
                 "safetensors is required to load cores; install it with `pip install safetensors`."
             ) from exc
 
-        result = load_file(str(file_path))
-        if isinstance(result, tuple) and len(result) == 2:
-            tensor_dict, metadata = result
-        else:
-            tensor_dict = result
-            metadata = {}
+        tensor_dict = load_file(str(file_path))
+
+        # Extract metadata via safe_open (load_file only returns tensors).
+        metadata = {}
+        try:
+            with safe_open(str(file_path), framework="numpy") as f:
+                meta = f.metadata()
+                if meta:
+                    metadata = dict(meta)
+        except Exception:
+            pass
 
         for core_name in self.cores:
             key = f"core_{core_name}"
@@ -269,12 +282,25 @@ class QCTNIOMixin:
                     raise KeyError(f"Missing tensor for core {core_name} in {file_path}")
                 continue
             tensor = self.backend.convert_to_tensor(array)
-            tn_tensor = TNTensor(tensor)
+            if isinstance(tensor, TNTensor):
+                tn_tensor = tensor
+            else:
+                tn_tensor = TNTensor(tensor)
             tn_tensor.auto_scale()
             self.cores_weights[core_name] = tn_tensor
 
         metadata_dict = {str(k): str(v) for k, v in metadata.items()}
         self._loaded_metadata = metadata_dict
+
+        # Restore core_names if saved.
+        if '_core_names' in metadata_dict:
+            import json
+            saved_names = json.loads(metadata_dict['_core_names'])
+            # Only restore names for cores that exist in this instance.
+            for sym in self.cores:
+                if sym in saved_names:
+                    self.core_names[sym] = saved_names[sym]
+
         return metadata_dict
 
     @classmethod

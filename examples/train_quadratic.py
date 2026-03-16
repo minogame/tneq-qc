@@ -183,9 +183,20 @@ def main():
     for core in circ_bra.cores:
         print(f"    {core}: {circ_bra.cores_weights[core].tensor}")
 
-    combined = QCTN.concat([circuit, mps, mx, mps_h, circ_bra])
+    # combined = QCTN.concat([circuit, mps, mx, mps_h, circ_bra])
+    combined = QCTN.concat([
+        ('cs', circuit),
+        ('mps', mps),
+        ('mx', mx),
+        ('mps_h', mps_h),
+        ('cs_t', circ_bra),
+    ])
     print_qctn_info(combined, "Combined (circuit + mps + mx + mps† + circuit†)")
 
+    print(f"combined.core_weights: {combined.cores_weights}")
+    print(f"combined.core_names: {combined.core_names}")
+    print(f"combined: {repr(combined)}")
+    # exit()
     # ------------------------------------------------------------------
     # 5. Collect trainable params from combined (leaf cores only)
     #    Must match the order the engine collects them.
@@ -197,10 +208,12 @@ def main():
     ]
     print(f"\nTrainable cores: {len(params)}")
 
-    # Pre-collect mx core names (in original mx) for inplace update.
-    # combined.cores_weights[new_name] shares the same TNTensor object as
-    # mx.cores_weights[old_name], so .set() on mx propagates to combined.
-    mx_core_names = list(mx.cores)
+    # Pre-collect mx readable names for inplace update via combined['mx.X'].
+    mx_readable_names = [
+        combined.core_names[sym]
+        for sym in combined.cores
+        if combined.core_names[sym].startswith('mx.')
+    ]
 
     # ------------------------------------------------------------------
     # 6. Verify one forward pass before training
@@ -239,17 +252,9 @@ def main():
         # with has_batch=True so build_graph injects 'a' into einsum.
         Mx_list, _ = data_gen.generate(x, K=PHYS_DIM, ret_type='TNTensor')
 
-        # ---- Update mx cores inplace --------------------------------
-        # Use .set(..., has_batch=True) so the TNTensor object already
-        # stored in combined.cores_weights gets the new batch data while
-        # keeping the same Python object identity (hermit views stay valid).
-        for i, c in enumerate(mx_core_names):
-            mx_item = Mx_list[i]   # TNTensor [B, K, K]
-            core = mx.cores_weights[c]
-            if isinstance(core, TNTensor):
-                core.set(mx_item.tensor, mx_item.scale, has_batch=True)
-            else:
-                mx.cores_weights[c] = mx_item
+        # ---- Update mx cores inplace via combined['mx.X'] -------------
+        for i, name in enumerate(mx_readable_names):
+            combined[name] = Mx_list[i]
 
         # ---- Forward + backward ------------------------------------
         loss_tensor, grads = engine.contract_with_compiled_strategy_for_gradient(
@@ -281,6 +286,21 @@ def main():
     print(f"  Final   loss : {loss_history[-1]:.6f}")
     print(f"  Loss reduced : {loss_history[0] - loss_history[-1]:.6f}")
     print("=" * 60)
+
+    # ------------------------------------------------------------------
+    # 8. Save trained cores
+    # ------------------------------------------------------------------
+    save_path = f"checkpoints/quadratic_{N_QUBITS}q_K{PHYS_DIM}_B{BOND_DIM}.safetensors"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    combined.save_cores(save_path, metadata={
+        'n_qubits': str(N_QUBITS),
+        'bond_dim': str(BOND_DIM),
+        'phys_dim': str(PHYS_DIM),
+        'n_steps': str(N_STEPS),
+        'final_loss': f"{loss_history[-1]:.6f}",
+    })
+    print(f"  Saved to: {save_path}")
+    print(f"  Core names: {combined.core_names}")
 
 
 if __name__ == "__main__":

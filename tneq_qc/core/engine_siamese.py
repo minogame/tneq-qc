@@ -596,12 +596,14 @@ class EngineSiamese:
 
     # ============================================================================
     # Probability Calculation Methods
+    # .. deprecated:: Use EngineCommon equivalents instead.
     # ============================================================================
 
     def calculate_full_probability(self, qctn, circuit_states_list, measure_input_list):
-        """
-        Calculate the full probability of observing a specific bitstring.
-        
+        """Calculate the full probability of observing a specific bitstring.
+
+        .. deprecated:: Use :meth:`EngineCommon.calculate_full_probability`.
+
         Args:
             qctn (QCTN): The quantum circuit tensor network.
             circuit_states_list (list): List of circuit input states.
@@ -622,8 +624,9 @@ class EngineSiamese:
         return res.tensor
 
     def calculate_marginal_probability(self, qctn, circuit_states_list, measure_input_list, qubit_indices: List[int]):
-        """
-        Calculate the marginal probability of a subset of qubits being in a specific state.
+        """Calculate the marginal probability of a subset of qubits.
+
+        .. deprecated:: Use :meth:`EngineCommon.calculate_marginal_probability`.
         
         Args:
             qctn (QCTN): The quantum circuit tensor network.
@@ -684,9 +687,12 @@ class EngineSiamese:
         else:
             return res
 
-    def calculate_conditional_probability(self, qctn, circuit_states_list, measure_input_list, 
+    def calculate_conditional_probability(self, qctn, circuit_states_list, measure_input_list,
                                           qubit_indices: List[int], target_indices: List[int]):
-        """
+        """Calculate conditional probability P(target | condition).
+
+        .. deprecated:: Use :meth:`EngineCommon.calculate_conditional_probability`.
+
         Calculate the conditional probability P(target | condition).
         
         Args:
@@ -775,11 +781,13 @@ class EngineSiamese:
 
     # ============================================================================
     # Sampling Methods
+    # .. deprecated:: Use EngineCommon.sample instead.
     # ============================================================================
 
     def sample(self, qctn, circuit_states_list, num_samples, K, bounds=[-5, 5], grid_size=1000):
-        """
-        Sample values from the quantum circuit using Numerical Inverse CDF method.
+        """Sample values from the quantum circuit using Numerical Inverse CDF method.
+
+        .. deprecated:: Use :meth:`EngineCommon.sample`.
         
         Args:
             qctn: QCTN object

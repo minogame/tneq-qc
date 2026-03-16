@@ -67,6 +67,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             self.backend = backend
             self._loaded_metadata = None
             self.cores_weights: dict = {}
+            self.core_names: dict = {}
             self._submodules: dict = {}
             return
 
@@ -90,23 +91,87 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         self.backend = backend
         self._loaded_metadata = None
         self.cores_weights: dict = {}
+        self.core_names: dict = {s: s for s in self.cores}
         self._submodules: dict = {}
 
         if not _defer_init and backend is not None:
             self._init_cores()
 
     def __repr__(self):
-        """String representation of the QCTN object."""
-        circuit_input = [str(info['input_shape']) for info in self.adjacency_table]
-        circuit_output = [str(info['output_shape']) for info in self.adjacency_table]
+        """Concise summary showing cores with readable names and shapes."""
+        if not self.cores:
+            if self._submodules:
+                return f"QCTN(composite, submodules={list(self._submodules.keys())})"
+            return "QCTN(empty)"
 
-        return (
-            f"circuit_input = \n{circuit_input}\n"
-            f" adjacency_table = \n{self.adjacency_table}\n"
-            f" circuit_output = \n{circuit_output}\n"
-        )
+        names = getattr(self, 'core_names', {})
+        parts = []
+        for sym in self.cores:
+            name = names.get(sym, sym)
+            w = self.cores_weights.get(sym)
+            if w is not None:
+                shape = tuple(w.shape)
+                label = f"{name}{shape}" if name != sym else f"{sym}{shape}"
+                if name != sym:
+                    label = f"{name}{shape}"
+            else:
+                label = f"{name}(?)"
+            parts.append(label)
+        cores_str = ", ".join(parts)
+        return f"QCTN(nqubits={self.nqubits}, cores=[{cores_str}])"
 
-    def __str__(self) -> str:
+    def __getitem__(self, key: str):
+        """Access a core tensor by readable name or symbol.
+
+        Args:
+            key: Readable name (e.g. ``'mx.a'``) or einsum symbol.
+
+        Returns:
+            Core tensor (TNTensor or raw tensor).
+
+        Raises:
+            KeyError: If no matching core is found.
+        """
+        # Direct symbol lookup.
+        if key in self.cores_weights:
+            return self.cores_weights[key]
+        # Readable name lookup.
+        return self.get_core_by_name(key)
+
+    def _symbol_for_name(self, name: str) -> str:
+        """Return the einsum symbol for a readable name.
+
+        Raises:
+            KeyError: If no core with that name exists.
+        """
+        names = getattr(self, 'core_names', {})
+        for sym, n in names.items():
+            if n == name:
+                return sym
+        raise KeyError(f"No core with name {name!r}")
+
+    def __setitem__(self, key: str, value):
+        """Set a core tensor by readable name or symbol.
+
+        If *value* is a ``TNTensor``, uses inplace ``set()`` to preserve
+        Python object identity (so hermit views remain valid).  Otherwise
+        replaces the entry in ``cores_weights`` directly.
+
+        Args:
+            key: Readable name (e.g. ``'mx.a'``) or einsum symbol.
+            value: New tensor (TNTensor or raw tensor).
+        """
+        # Resolve to symbol.
+        if key in self.cores_weights:
+            sym = key
+        else:
+            sym = self._symbol_for_name(key)
+
+        existing = self.cores_weights[sym]
+        if isinstance(existing, TNTensor) and isinstance(value, TNTensor):
+            existing.set(value.tensor, value.scale, has_batch=value.has_batch)
+        else:
+            self.cores_weights[sym] = value
         """Pretty-print tensor network structure based on adjacency_table.
 
         Uses linked-list logic to trace cores on each qubit from start to end,
@@ -383,6 +448,62 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         """
         return dict(self.named_cores())
 
+    @property
+    def named_weights(self) -> dict:
+        """Core tensors keyed by readable name (from ``core_names``).
+
+        Unlike ``cores_weights`` (keyed by einsum symbol), this dict uses
+        the human-readable names assigned during ``concat``.
+
+        Returns:
+            dict[str, Any]: ``{readable_name: tensor}`` in core order.
+        """
+        names = getattr(self, 'core_names', {})
+        return {
+            names.get(sym, sym): self.cores_weights[sym]
+            for sym in self.cores
+            if sym in self.cores_weights
+        }
+
+    # ================================================================
+    # Core name helpers
+    # ================================================================
+
+    def cores_by_prefix(self, prefix: str) -> dict:
+        """Return cores whose readable name starts with ``prefix.``.
+
+        Args:
+            prefix: Name prefix to filter by (without trailing dot).
+
+        Returns:
+            dict: ``{symbol: tensor}`` for matching cores.
+        """
+        names = getattr(self, 'core_names', {})
+        dot_prefix = f"{prefix}."
+        return {
+            sym: self.cores_weights[sym]
+            for sym, name in names.items()
+            if name.startswith(dot_prefix) or name == prefix
+        }
+
+    def get_core_by_name(self, name: str):
+        """Look up a core tensor by its readable name.
+
+        Args:
+            name: Readable name (e.g. ``'mx.A'``).
+
+        Returns:
+            The core tensor (TNTensor or raw tensor).
+
+        Raises:
+            KeyError: If no core with that name exists.
+        """
+        names = getattr(self, 'core_names', {})
+        for sym, n in names.items():
+            if n == name:
+                return self.cores_weights[sym]
+        raise KeyError(f"No core with name {name!r}")
+
     # ================================================================
     # Chunk / Concat operations  (renamed from Split / Merge)
     # ================================================================
@@ -479,12 +600,17 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         qctn1 = QCTN(graph1, backend=self.backend)
         qctn2 = QCTN(graph2, backend=self.backend)
 
+        src_names = getattr(self, 'core_names', {})
         for core_name in self.cores[:split_idx]:
             if core_name in self.cores_weights:
                 qctn1.cores_weights[core_name] = self.cores_weights[core_name]
+            if core_name in src_names:
+                qctn1.core_names[core_name] = src_names[core_name]
         for core_name in self.cores[split_idx:]:
             if core_name in self.cores_weights:
                 qctn2.cores_weights[core_name] = self.cores_weights[core_name]
+            if core_name in src_names:
+                qctn2.core_names[core_name] = src_names[core_name]
 
         return qctn1, qctn2
 
@@ -516,18 +642,23 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         4. Core tensors are renamed contiguously via
            ``opt_einsum.get_symbol(0, 1, 2, …)``.
 
+        Each element can be a bare QCTN or a ``(name, qctn)`` tuple.  When
+        names are provided, core names in the merged QCTN use
+        ``"<name>.<original_name>"`` notation (similar to PyTorch modules).
+        Duplicate prefixes are deduplicated by appending ``_1``, ``_2``, etc.
+
         Args:
-            *args: Either a single list/tuple of QCTNs, or multiple QCTN arguments.
-                The list-based API is recommended: ``QCTN.concat([q1, q2, q3])``
+            *args: Either a single list/tuple of QCTNs (or named tuples),
+                or multiple QCTN arguments.
 
         Returns:
             QCTN: A new merged QCTN with renamed cores and copied weights.
 
         Examples:
-            >>> # Recommended list-based API
+            >>> # Bare QCTNs (backward-compatible)
             >>> result = QCTN.concat([q1, q2, q3])
-            >>> # Also accepts multiple arguments
-            >>> result = QCTN.concat(q1, q2, q3)
+            >>> # Named QCTNs
+            >>> result = QCTN.concat([('mps', mps), ('mx', mx)])
         """
         # Parse arguments
         if len(args) == 0:
@@ -535,27 +666,61 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
 
         # If first arg is a list/tuple, use it as the list of QCTNs
         if len(args) == 1 and isinstance(args[0], (list, tuple)):
-            qctns = args[0]
+            items = args[0]
+            # Distinguish list-of-QCTNs from a single (name, qctn) tuple
+            if len(items) == 2 and isinstance(items[0], str) and isinstance(items[1], QCTN):
+                # Single named tuple — wrap it
+                items = [items]
         else:
-            # Multiple QCTN arguments - treat as list
-            qctns = args
+            items = list(args)
 
-        if len(qctns) == 0:
+        # Normalize: ensure each item is (prefix, qctn)
+        named_qctns: list = []
+        used_prefixes: dict = {}  # prefix → count for dedup
+        for item in items:
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+                prefix, qctn_obj = item
+            elif isinstance(item, QCTN):
+                prefix, qctn_obj = None, item
+            else:
+                raise TypeError(
+                    f"QCTN.concat: expected QCTN or (name, QCTN) tuple, got {type(item)}"
+                )
+            # Deduplicate prefix
+            if prefix is not None:
+                if prefix in used_prefixes:
+                    used_prefixes[prefix] += 1
+                    prefix = f"{prefix}_{used_prefixes[prefix]}"
+                else:
+                    used_prefixes[prefix] = 0
+            named_qctns.append((prefix, qctn_obj))
+
+        if len(named_qctns) == 0:
             raise ValueError("Cannot concat empty list of QCTNs")
 
-        if len(qctns) == 1:
-            return qctns[0]
+        if len(named_qctns) == 1:
+            return named_qctns[0][1]
 
         # Sequentially merge from left to right
-        result = qctns[0]
-        for qctn in qctns[1:]:
-            result = QCTN._concat_impl(result, qctn)
+        prefix_l, result = named_qctns[0]
+        for prefix_r, qctn_r in named_qctns[1:]:
+            result = QCTN._concat_impl(result, qctn_r, prefix_l, prefix_r)
+            prefix_l = None  # already merged into result's core_names
 
         return result
 
     @staticmethod
-    def _concat_impl(qctn1, qctn2):
-        """Internal implementation shared by concat() and merge()."""
+    def _concat_impl(qctn1, qctn2, prefix1=None, prefix2=None):
+        """Internal implementation shared by concat() and merge().
+
+        Args:
+            qctn1: Left QCTN.
+            qctn2: Right QCTN.
+            prefix1: Optional human-readable prefix for qctn1's cores.
+                     ``None`` means reuse qctn1's existing ``core_names``.
+            prefix2: Optional human-readable prefix for qctn2's cores.
+                     ``None`` means reuse qctn2's existing ``core_names``.
+        """
         import opt_einsum
 
         n1, n2 = qctn1.nqubits, qctn2.nqubits
@@ -610,12 +775,28 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         backend = qctn1.backend if qctn1.backend is not None else qctn2.backend
         new_qctn = QCTN(new_graph, backend=backend)
 
+        # Copy weights (shallow — shares TNTensor references).
         for old_name, new_name in core_map1.items():
             if old_name in qctn1.cores_weights:
                 new_qctn.cores_weights[new_name] = qctn1.cores_weights[old_name]
         for old_name, new_name in core_map2.items():
             if old_name in qctn2.cores_weights:
                 new_qctn.cores_weights[new_name] = qctn2.cores_weights[old_name]
+
+        # Build core_names: symbol → readable name.
+        q1_names = getattr(qctn1, 'core_names', {s: s for s in qctn1.cores})
+        q2_names = getattr(qctn2, 'core_names', {s: s for s in qctn2.cores})
+
+        for old, new in core_map1.items():
+            orig_name = q1_names.get(old, old)
+            new_qctn.core_names[new] = (
+                f"{prefix1}.{orig_name}" if prefix1 is not None else orig_name
+            )
+        for old, new in core_map2.items():
+            orig_name = q2_names.get(old, old)
+            new_qctn.core_names[new] = (
+                f"{prefix2}.{orig_name}" if prefix2 is not None else orig_name
+            )
 
         return new_qctn
 
@@ -722,6 +903,8 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 # Wrap raw tensor first
                 cloned_qctn.cores_weights[core_name] = TNTensor(tensor).clone()
 
+        cloned_qctn.core_names = dict(getattr(self, 'core_names', {}))
+
         # Clone submodules
         cloned_qctn._submodules = {}
         for name, submodule in self._submodules.items():
@@ -795,6 +978,8 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             else:
                 # Wrap raw tensor first
                 hermit_qctn.cores_weights[core_name] = TNTensor(tensor).hermit()
+
+        hermit_qctn.core_names = dict(getattr(self, 'core_names', {}))
 
         # Apply hermit to submodules
         hermit_qctn._submodules = {}

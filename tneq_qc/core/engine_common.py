@@ -11,6 +11,8 @@ from __future__ import annotations
 from enum import Enum, auto
 from typing import Callable, Optional, Union, List, Tuple, Dict, Any
 
+from tqdm import tqdm
+
 from ..contractor import EinsumStrategy, StrategyCompiler, GreedyStrategy
 from ..backends.backend_factory import BackendFactory, ComputeBackend
 from .tn_tensor import TNTensor
@@ -246,3 +248,185 @@ class EngineCommon:
         argnums = list(range(len(raw_core_tensors)))
         value_and_grad_fn = self.backend.compute_value_and_grad(loss_fn, argnums=argnums)
         return value_and_grad_fn(*raw_core_tensors)
+
+    # ============================================================================
+    # Probability Calculation
+    # ============================================================================
+
+    def calculate_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
+        """Calculate probability by updating mx cores and contracting.
+
+        Full probability: *mx_dict* covers all mx cores.
+        Marginal probability: *mx_dict* covers only a subset; the rest
+        stay as identity (trace-out).
+
+        Args:
+            qctn: Combined QCTN (built via ``QCTN.concat``).
+            mx_dict: ``{readable_name: TNTensor}`` of mx cores to update.
+                Example: ``{'mx.a': Mx_0, 'mx.b': Mx_1}``.
+
+        Returns:
+            float: Scalar probability value.
+        """
+        for name, tensor in mx_dict.items():
+            qctn[name] = tensor
+
+        result = self.contract_with_compiled_strategy(qctn)
+
+        if isinstance(result, TNTensor):
+            result.scale_to(1.0)
+            return result.tensor.item()
+        return float(result)
+
+    # ============================================================================
+    # Sampling
+    # ============================================================================
+
+    def sample(
+        self,
+        qctn,
+        data_generator,
+        sample_core_names: List[str],
+        num_samples: int,
+        bounds: Tuple[float, float] = (-5, 5),
+        grid_size: int = 1000,
+    ):
+        """Sample from the QCTN probability distribution via inverse CDF.
+
+        Sequentially samples each core in *sample_core_names* using the
+        autoregressive conditional: already-sampled cores are fixed,
+        future cores keep identity (trace-out).
+
+        Args:
+            qctn: Combined QCTN (built via ``QCTN.concat``).
+            data_generator: DataGenerator for Hermite Mx generation.
+            sample_core_names: Readable names of mx cores to sample,
+                in autoregressive order (e.g. ``['mx.a', 'mx.b']``).
+            num_samples: Number of samples (S).
+            bounds: Sampling range ``(x_min, x_max)``.
+            grid_size: Number of CDF grid points (G).
+
+        Returns:
+            Tensor of shape ``(num_samples, len(sample_core_names))``.
+        """
+        # Infer K from the first sample core.
+        first_core = qctn[sample_core_names[0]]
+        raw_first = first_core.tensor if isinstance(first_core, TNTensor) else first_core
+        K = raw_first.shape[-1]
+
+        x_min, x_max = bounds
+        grid_x = self.backend.linspace(x_min, x_max, steps=grid_size)
+
+        # Identity for resetting unsampled cores.
+        ident = self.backend.eye(K)
+        if isinstance(ident, TNTensor):
+            ident_tt = ident
+        else:
+            ident_tt = TNTensor(ident)
+
+        # Reset all sample cores to identity before starting.
+        for name in sample_core_names:
+            qctn[name] = ident_tt
+
+        samples = self.backend.zeros((num_samples, len(sample_core_names)))
+        if isinstance(samples, TNTensor):
+            samples = samples.tensor
+
+        for i, core_name in enumerate(tqdm(
+            sample_core_names, desc="Sampling"
+        )):
+            # A: Generate Mx on grid → (G, K, K)
+            grid_x_input = self.backend.unsqueeze(grid_x, 1)  # (G, 1)
+            mx_list_grid, _ = data_generator.generate(
+                grid_x_input, K=K, ret_type='TNTensor'
+            )
+            Mx_grid = mx_list_grid[0]  # TNTensor (G, K, K)
+            raw_grid = Mx_grid.tensor if isinstance(Mx_grid, TNTensor) else Mx_grid
+
+            # B: Expand grid to (S*G, K, K) and set as current core.
+            m = self.backend.unsqueeze(raw_grid, 0)               # (1, G, K, K)
+            m = self.backend.expand(m, num_samples, -1, -1, -1)   # (S, G, K, K)
+            m = self.backend.reshape(m, (num_samples * grid_size, K, K))
+            qctn[core_name] = TNTensor(m, has_batch=True)
+
+            # C: Expand all OTHER sample cores to match batch S*G.
+            saved_cores: Dict[str, Any] = {}
+            for other_name in sample_core_names:
+                if other_name == core_name:
+                    continue
+                other = qctn[other_name]
+                raw_other = other.tensor if isinstance(other, TNTensor) else other
+                saved_cores[other_name] = other  # save for restore
+
+                if raw_other.ndim == 2:
+                    # Unbatched (K, K) → expand to (S*G, K, K)
+                    expanded = self.backend.unsqueeze(raw_other, 0)
+                    expanded = self.backend.expand(
+                        expanded, num_samples * grid_size, -1, -1
+                    )
+                elif raw_other.shape[0] == num_samples:
+                    # Batched (S, K, K) → expand to (S, G, K, K) → (S*G, K, K)
+                    expanded = self.backend.unsqueeze(raw_other, 1)
+                    expanded = self.backend.expand(expanded, -1, grid_size, -1, -1)
+                    expanded = self.backend.reshape(
+                        expanded, (num_samples * grid_size, K, K)
+                    )
+                else:
+                    expanded = raw_other
+
+                qctn[other_name] = TNTensor(expanded, has_batch=True)
+
+            # D: Contract.
+            result = self.contract_with_compiled_strategy(qctn)
+
+            # E: Restore non-grid cores to their saved values.
+            for other_name, saved in saved_cores.items():
+                qctn[other_name] = saved
+
+            # F: Extract density → CDF → inverse CDF sample.
+            if isinstance(result, TNTensor):
+                result_raw = result.tensor
+            else:
+                result_raw = result
+            if isinstance(result_raw, TNTensor):
+                result_raw = result_raw.tensor
+
+            density = result_raw.reshape(num_samples, grid_size)
+            density = density.abs().square()
+            density = density.clamp(min=0.0)
+
+            cdf = density.cumsum(dim=1)
+            total = cdf[:, -1].unsqueeze(1)
+            cdf = cdf / (total + 1e-10)
+
+            u = self.backend.rand(
+                (num_samples, 1), dtype=self.backend.torch.float32
+            )
+            if isinstance(u, TNTensor):
+                u = u.tensor
+
+            mask = (cdf < u).float()
+            indices = mask.sum(dim=1).long().clamp(max=grid_size - 2).unsqueeze(1)
+            indices_next = indices + 1
+
+            cdf_L = cdf.gather(1, indices)
+            cdf_R = cdf.gather(1, indices_next)
+
+            grid_raw = grid_x.tensor if isinstance(grid_x, TNTensor) else grid_x
+            grid_exp = grid_raw.unsqueeze(0).expand(num_samples, -1)
+
+            x_L = grid_exp.gather(1, indices)
+            x_R = grid_exp.gather(1, indices_next)
+
+            frac = (u - cdf_L) / (cdf_R - cdf_L + 1e-10)
+            sampled_y = x_L + frac * (x_R - x_L)
+
+            samples[:, i] = sampled_y.squeeze(1)
+
+            # G: Update current core with sampled Mx (S, K, K).
+            mx_list_y, _ = data_generator.generate(
+                sampled_y, K=K, ret_type='TNTensor'
+            )
+            qctn[core_name] = mx_list_y[0]
+
+        return samples
