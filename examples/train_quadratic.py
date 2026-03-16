@@ -9,7 +9,7 @@ Structure: circuit + mps + mx + mps† + circuit†
 - mps†    : Hermitian conjugate of mps (shares cores with mps)
 - circuit†: bra-structured conjugate of circuit (fixed)
 
-Loss: binary cross-entropy on the scalar expectation value ⟨ψ|U†MU|ψ⟩.
+Loss: cross-entropy -mean(log(P+ε)) on batch expectation value ⟨ψ|U†MU|ψ⟩.
 """
 
 import sys
@@ -31,12 +31,13 @@ from tneq_qc.utils.data_generator import DataGenerator
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
-N_QUBITS  = 4
-BOND_DIM  = 2
-PHYS_DIM  = 2       # K for DataGenerator (== physical dim of mx core)
-N_STEPS   = 1000
-LR        = 0.01
-LOG_EVERY = 1
+N_QUBITS   = 4
+BOND_DIM   = 2
+PHYS_DIM   = 2       # K for DataGenerator (== physical dim of mx core)
+BATCH_SIZE = 128     # number of samples per Mx update step
+N_STEPS    = 1000
+LR         = 0.01
+LOG_EVERY  = 1
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -220,7 +221,7 @@ def main():
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
-    print(f"Training  steps={N_STEPS}  lr={LR}  optimizer=SGDG  loss=NLL")
+    print(f"Training  steps={N_STEPS}  batch={BATCH_SIZE}  lr={LR}  optimizer=SGDG  loss=CE")
     print("=" * 60)
 
     optimizer_state: dict = {}
@@ -228,35 +229,27 @@ def main():
 
     for step in tqdm(range(1, N_STEPS + 1)):
 
-        # ---- Generate training sample --------------------------------
-        # x shape: [1, N_QUBITS]; simple binary label: mean(x) > 0
-        x = np.random.uniform(-1.0, 1.0, size=(1, N_QUBITS)).astype(np.float32)
-        y = 1 # float(x.mean() > 0)
+        # ---- Generate training batch --------------------------------
+        # x shape: [BATCH_SIZE, N_QUBITS]
+        x = np.random.uniform(-1.0, 1.0, size=(BATCH_SIZE, N_QUBITS)).astype(np.float32)
+        y = 1
 
         # ---- Generate Mx from x via DataGenerator -------------------
-        # Mx_list: N_QUBITS tensors, each TNTensor of shape [1, K, K]
-        Mx_list, _ = data_gen.generate(x, K=PHYS_DIM)
-
-        # print(f"  Mx_list: {Mx_list}")
+        # Mx_list: N_QUBITS TNTensors, each of shape [BATCH_SIZE, K, K],
+        # with has_batch=True so build_graph injects 'a' into einsum.
+        Mx_list, _ = data_gen.generate(x, K=PHYS_DIM, ret_type='TNTensor')
 
         # ---- Update mx cores inplace --------------------------------
-        # combined shares the same TNTensor objects as mx, so .set() here
-        # is immediately visible to the engine's next contraction.
-
+        # Use .set(..., has_batch=True) so the TNTensor object already
+        # stored in combined.cores_weights gets the new batch data while
+        # keeping the same Python object identity (hermit views stay valid).
         for i, c in enumerate(mx_core_names):
-            mx_item = Mx_list[i]
-            if isinstance(mx_item, TNTensor):
-                data  = mx_item.tensor[0]   # [K, K]
-                scale = mx_item.scale
-            else:
-                data  = mx_item[0]          # [K, K]
-                scale = 1.0
+            mx_item = Mx_list[i]   # TNTensor [B, K, K]
             core = mx.cores_weights[c]
             if isinstance(core, TNTensor):
-                core.tensor.data.copy_(data)
-                core.scale = scale
+                core.set(mx_item.tensor, mx_item.scale, has_batch=True)
             else:
-                core.data.copy_(data)
+                mx.cores_weights[c] = mx_item
 
         # ---- Forward + backward ------------------------------------
         loss_tensor, grads = engine.contract_with_compiled_strategy_for_gradient(

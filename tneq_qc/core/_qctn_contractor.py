@@ -320,6 +320,17 @@ class QCTNContractorMixin:
             else:
                 tensor_source = 'core'
 
+            # Detect batch dimension: if the TNTensor was created with
+            # has_batch=True, reserve 'a' as the batch symbol so that
+            # RowPriorityStrategy automatically prepends it to the einsum
+            # subscript for this core.
+            batch_symbol = (
+                'a' if (_TNTensor is not None
+                        and isinstance(t, _TNTensor)
+                        and t.has_batch)
+                else ''
+            )
+
             core_tensor_list.append({
                 'core_idx':        uid,
                 'core_name':       core_info['core_name'],
@@ -330,7 +341,7 @@ class QCTNContractorMixin:
                 'out_edge_list':   deepcopy(core_info['out_edge_list']),
                 'side':            TensorSide.LEFT,
                 'original_core_idx': core_info['core_idx'],
-                'batch_symbol':    "",
+                'batch_symbol':    batch_symbol,
             })
 
         # ==================================================================

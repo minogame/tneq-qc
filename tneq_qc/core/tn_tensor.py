@@ -31,6 +31,7 @@ class TNTensor:
         scale: float = 1.0,
         log_scale: Optional[float] = None,
         *,
+        has_batch: bool = False,
         is_ref: bool = False,
         is_transposed: bool = False,
         source: Optional["TNTensor"] = None,
@@ -42,6 +43,10 @@ class TNTensor:
             tensor:        Underlying backend tensor (torch.Tensor, jnp.ndarray, …).
             scale:         Multiplicative scale factor (float).
             log_scale:     Pre-computed ``log(|scale|)``; computed if None.
+            has_batch:     True when the first dimension is a batch dimension.
+                           The remaining dimensions must match the edge ranks in
+                           the QCTN adjacency table.  Used by ``build_graph`` to
+                           inject the 'a' batch symbol into einsum expressions.
             is_ref:        True when this tensor is a view/reference of ``source``.
             is_transposed: True when this tensor is the (conjugate-)transpose of ``source``.
             source:        Original TNTensor from which this one was derived.
@@ -55,6 +60,7 @@ class TNTensor:
             if log_scale is not None
             else (math.log(abs(self.scale)) if self.scale != 0 else float("-inf"))
         )
+        self.has_batch = has_batch
         self.is_ref = is_ref
         self.is_transposed = is_transposed
         self.source = source
@@ -65,13 +71,22 @@ class TNTensor:
     # Core mutator
     # ------------------------------------------------------------------
 
-    def set(self, tensor: Any, scale: float = 1.0):
-        """Replace the underlying tensor and scale in-place."""
+    def set(self, tensor: Any, scale: float = 1.0, has_batch: Optional[bool] = None):
+        """Replace the underlying tensor and scale in-place.
+
+        Args:
+            tensor:    New underlying tensor.
+            scale:     New scale factor.
+            has_batch: If not None, overwrite the ``has_batch`` flag.
+                       Passing ``True`` marks the first dimension as batch.
+        """
         self._tensor = tensor
         self.scale = float(scale)
         self.log_scale = (
             math.log(abs(self.scale)) if self.scale != 0 else float("-inf")
         )
+        if has_batch is not None:
+            self.has_batch = has_batch
 
     # ------------------------------------------------------------------
     # Properties – tensor metadata

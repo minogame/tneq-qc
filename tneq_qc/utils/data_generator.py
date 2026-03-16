@@ -195,9 +195,7 @@ class DataGenerator:
         for i in range(num_qubits):
             tmp = self.backend.convert_to_tensor(Mx_np[:, i, :, :])
             if ret_type == "TNTensor":
-                tt = TNTensor(tmp)
-                # tt.auto_scale()
-                tmp = tt
+                tmp = TNTensor(tmp, has_batch=True)
             Mx_list.append(tmp)
 
         return Mx_list, phi_x_tensor
@@ -244,7 +242,7 @@ class DataGenerator:
         for i in range(num_qubits):
             tmp = Mx_raw[:, i, :, :]          # raw [B, K, K]
             if ret_type == "TNTensor":
-                tmp = TNTensor(tmp)
+                tmp = TNTensor(tmp, has_batch=True)
             Mx_list.append(tmp)
 
         return Mx_list, out
