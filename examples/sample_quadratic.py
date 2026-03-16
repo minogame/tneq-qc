@@ -162,6 +162,10 @@ def main():
     else:
         heatmap_vals = result.detach()
 
+    # Born rule: complex → real probability |W|².
+    if heatmap_vals.is_complex():
+        heatmap_vals = (heatmap_vals * heatmap_vals.conj()).real
+
     heatmap = heatmap_vals.reshape(edge, edge).cpu().numpy()
 
     # ------------------------------------------------------------------

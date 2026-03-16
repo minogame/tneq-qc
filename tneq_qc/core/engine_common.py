@@ -275,8 +275,15 @@ class EngineCommon:
 
         if isinstance(result, TNTensor):
             result.scale_to(1.0)
-            return result.tensor.item()
-        return float(result)
+            val = result.tensor
+        else:
+            val = result
+
+        # Born rule: complex → real probability |W|².
+        if hasattr(val, 'is_complex') and val.is_complex():
+            val = (val * val.conj()).real
+
+        return float(val.item()) if hasattr(val, 'item') else float(val)
 
     # ============================================================================
     # Sampling
@@ -316,6 +323,11 @@ class EngineCommon:
 
         x_min, x_max = bounds
         grid_x = self.backend.linspace(x_min, x_max, steps=grid_size)
+        # Grid values are always real.
+        if isinstance(grid_x, TNTensor):
+            grid_x = grid_x.tensor
+        if hasattr(grid_x, 'is_complex') and grid_x.is_complex():
+            grid_x = grid_x.real
 
         # Identity for resetting unsampled cores.
         ident = self.backend.eye(K)
@@ -331,6 +343,9 @@ class EngineCommon:
         samples = self.backend.zeros((num_samples, len(sample_core_names)))
         if isinstance(samples, TNTensor):
             samples = samples.tensor
+        # Samples are always real (continuous x values).
+        if hasattr(samples, 'is_complex') and samples.is_complex():
+            samples = samples.real
 
         for i, core_name in enumerate(tqdm(
             sample_core_names, desc="Sampling"
@@ -392,7 +407,11 @@ class EngineCommon:
                 result_raw = result_raw.tensor
 
             density = result_raw.reshape(num_samples, grid_size)
-            density = density.abs().square()
+            # Born rule: |W|² → real non-negative density.
+            if hasattr(density, 'is_complex') and density.is_complex():
+                density = (density * density.conj()).real
+            else:
+                density = density.abs().square()
             density = density.clamp(min=0.0)
 
             cdf = density.cumsum(dim=1)

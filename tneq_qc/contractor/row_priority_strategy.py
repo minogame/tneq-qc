@@ -93,7 +93,7 @@ class RowPriorityStrategy(ContractionStrategy):
                                     break
                 entries_on_qubit.extend(additional_entries)
 
-                groups = _find_connected_groups(entries_on_qubit)
+                groups = _find_connected_groups(entries_on_qubit, qubit_idx)
 
                 new_entries = []
                 ids_to_remove = set()
@@ -166,8 +166,12 @@ class RowPriorityStrategy(ContractionStrategy):
 # Helper functions (module-level to keep strategy class clean)
 # ======================================================================
 
-def _find_connected_groups(entries_on_qubit: List[Dict]) -> List[List[Dict]]:
-    """Find connected components via Union-Find."""
+def _find_connected_groups(entries_on_qubit: List[Dict], qubit_idx: int = -1) -> List[List[Dict]]:
+    """Find connected components via Union-Find.
+
+    Entries are connected if they share an internal edge (neighbor_idx >= 0)
+    or if they share a trace-closed symbol on the current qubit.
+    """
     if not entries_on_qubit:
         return []
     n = len(entries_on_qubit)
@@ -194,6 +198,20 @@ def _find_connected_groups(entries_on_qubit: List[Dict]) -> List[List[Dict]]:
             neighbor_idx = edge['neighbor_idx']
             if neighbor_idx >= 0 and neighbor_idx in idx_to_pos:
                 union(i, idx_to_pos[neighbor_idx])
+
+    # Trace-closed edges on the current qubit create implicit connections:
+    # entries sharing the same trace-closed symbol must be in the same group.
+    if qubit_idx >= 0:
+        trace_symbol_to_pos: Dict[str, int] = {}
+        for i, entry in enumerate(entries_on_qubit):
+            for edge in entry['in_edge_list'] + entry['out_edge_list']:
+                if (edge.get('is_trace_closed')
+                        and edge['qubit_idx'] == qubit_idx):
+                    sym = edge['symbol']
+                    if sym in trace_symbol_to_pos:
+                        union(i, trace_symbol_to_pos[sym])
+                    else:
+                        trace_symbol_to_pos[sym] = i
 
     groups_dict: Dict[int, list] = {}
     for i in range(n):
@@ -249,26 +267,32 @@ def _contract_group(
                 tensor_dim = original_in_count - 1 - edge_list_idx
                 dim_symbols[tensor_dim] = symbol
 
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                empty_edge = edge['neighbor_idx'] == -1
+                # Trace-closed on CURRENT qubit → summed here (don't collect).
+                # Trace-closed on OTHER qubits → preserve for later.
+                trace_here = edge.get('is_trace_closed') and edge['qubit_idx'] == qubit_idx
+                if not trace_here:
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    empty_edge = edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed')
 
-                if empty_edge or (not is_internal and not is_on_current_qubit):
-                    collected_out_edges.append((symbol, edge.copy()))
+                    if empty_edge or (not is_internal and not is_on_current_qubit):
+                        collected_out_edges.append((symbol, edge.copy()))
 
             for edge_list_idx, edge in enumerate(entry['in_edge_list']):
                 symbol = edge['symbol']
                 tensor_dim = original_in_count + original_out_count - 1 - edge_list_idx
                 dim_symbols[tensor_dim] = symbol
 
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                empty_edge = edge['neighbor_idx'] == -1
+                trace_here = edge.get('is_trace_closed') and edge['qubit_idx'] == qubit_idx
+                if not trace_here:
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    empty_edge = edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed')
 
-                if empty_edge or (not is_internal and not is_on_current_qubit):
-                    collected_in_edges.append((symbol, edge.copy()))
+                    if empty_edge or (not is_internal and not is_on_current_qubit):
+                        collected_in_edges.append((symbol, edge.copy()))
 
             part += "".join(s for s in dim_symbols if s is not None)
             einsum_parts.append(part)
@@ -278,26 +302,41 @@ def _contract_group(
             for edge in entry['in_edge_list']:
                 symbol = edge['symbol']
                 part += symbol
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                empty_edge = edge['neighbor_idx'] == -1
-                if empty_edge or (not is_internal and not is_on_current_qubit):
-                    collected_in_edges.append((symbol, edge.copy()))
+                trace_here = edge.get('is_trace_closed') and edge['qubit_idx'] == qubit_idx
+                if not trace_here:
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    empty_edge = edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed')
+                    if empty_edge or (not is_internal and not is_on_current_qubit):
+                        collected_in_edges.append((symbol, edge.copy()))
 
             for edge in entry['out_edge_list']:
                 symbol = edge['symbol']
                 part += symbol
-                neighbor_idx = edge['neighbor_idx']
-                is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
-                is_on_current_qubit = edge['qubit_idx'] == qubit_idx
-                empty_edge = edge['neighbor_idx'] == -1
-                if empty_edge or (not is_internal and not is_on_current_qubit):
-                    collected_out_edges.append((symbol, edge.copy()))
+                trace_here = edge.get('is_trace_closed') and edge['qubit_idx'] == qubit_idx
+                if not trace_here:
+                    neighbor_idx = edge['neighbor_idx']
+                    is_internal = neighbor_idx >= 0 and neighbor_idx in group_indices
+                    is_on_current_qubit = edge['qubit_idx'] == qubit_idx
+                    empty_edge = edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed')
+                    if empty_edge or (not is_internal and not is_on_current_qubit):
+                        collected_out_edges.append((symbol, edge.copy()))
 
             einsum_parts.append(part)
 
-    # Build output symbols
+    # Build output symbols.
+    # For trace-closed pairs: if BOTH in and out edges with the same symbol
+    # ended up in this group, the symbol should NOT appear in output (it gets
+    # summed = traced).  If only ONE side is present, preserve it for later.
+    in_syms = set(sym for sym, _ in collected_in_edges)
+    out_syms = set(sym for sym, _ in collected_out_edges)
+    trace_summed = in_syms & out_syms  # symbols present on both sides → sum now
+
+    # Remove trace-summed symbols from collected edges (they'll be contracted).
+    collected_in_edges = [(s, e) for s, e in collected_in_edges if s not in trace_summed]
+    collected_out_edges = [(s, e) for s, e in collected_out_edges if s not in trace_summed]
+
     output_symbols = []
     new_batch_symbol = ""
     if 'a' in batch_symbols:

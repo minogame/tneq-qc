@@ -392,4 +392,42 @@ class QCTNContractorMixin:
                 if 'symbol' not in edge:
                     edge['symbol'] = next(sym_gen)
 
+        # ==================================================================
+        # Step 4: Close trace — assign matching symbols to boundary pairs
+        # ==================================================================
+        trace_qubits = getattr(self, 'trace_qubits', set())
+        if trace_qubits:
+            for q_idx in trace_qubits:
+                # Collect boundary out edges on this qubit
+                boundary_out = []
+                for entry in core_tensor_list:
+                    for edge in entry['out_edge_list']:
+                        if edge['qubit_idx'] == q_idx and edge['neighbor_idx'] == -1:
+                            boundary_out.append(edge)
+
+                # Collect boundary in edges on this qubit
+                boundary_in = []
+                for entry in core_tensor_list:
+                    for edge in entry['in_edge_list']:
+                        if edge['qubit_idx'] == q_idx and edge['neighbor_idx'] == -1:
+                            boundary_in.append(edge)
+
+                if len(boundary_out) != len(boundary_in):
+                    raise ValueError(
+                        f"Trace qubit {q_idx}: mismatched boundary count "
+                        f"(out={len(boundary_out)}, in={len(boundary_in)})"
+                    )
+                for out_e, in_e in zip(boundary_out, boundary_in):
+                    if out_e['edge_rank'] != in_e['edge_rank']:
+                        raise ValueError(
+                            f"Trace qubit {q_idx}: boundary rank mismatch "
+                            f"(out={out_e['edge_rank']}, in={in_e['edge_rank']})"
+                        )
+                    # Close: make in_edge share the out_edge symbol → einsum contracts.
+                    # Mark both edges so _contract_group skips collecting them
+                    # as open boundaries.
+                    in_e['symbol'] = out_e['symbol']
+                    in_e['is_trace_closed'] = True
+                    out_e['is_trace_closed'] = True
+
         return core_tensor_list, {'core_map': core_map}

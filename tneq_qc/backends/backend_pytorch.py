@@ -466,6 +466,12 @@ class BackendPyTorch(ComputeBackend):
         else:
             sign_correction = self.torch.sign(d)
             Q = Q * sign_correction.unsqueeze(0)
+            # Ensure det(Q) = +1 (proper rotation / SO(n)).
+            # Without this, Q may be a reflection (det = -1).  For 2×2 real
+            # matrices, SO(2) and O⁻(2) are orthogonal under the Frobenius
+            # inner product, causing Tr(S·T†) = 0 when S ∈ SO(2), T ∈ O⁻(2).
+            if Q.shape[0] >= 2 and self.torch.det(Q) < 0:
+                Q[:, 0] = -Q[:, 0]
 
         if self.is_complex(self.torch.zeros(1, dtype=self.default_dtype)):
             Q = Q.to(self.default_dtype)

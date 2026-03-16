@@ -68,6 +68,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             self._loaded_metadata = None
             self.cores_weights: dict = {}
             self.core_names: dict = {}
+            self.trace_qubits: set = set()
             self._submodules: dict = {}
             return
 
@@ -92,6 +93,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         self._loaded_metadata = None
         self.cores_weights: dict = {}
         self.core_names: dict = {s: s for s in self.cores}
+        self.trace_qubits: set = set()
         self._submodules: dict = {}
 
         if not _defer_init and backend is not None:
@@ -505,6 +507,36 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         raise KeyError(f"No core with name {name!r}")
 
     # ================================================================
+    # Trace operations
+    # ================================================================
+
+    def set_trace(self, qubit_indices='all'):
+        """Mark qubits for trace (close boundary in/out edges).
+
+        Only effective with ``RowPriorityStrategy`` (``strategy_mode='full'``
+        or ``'balanced'``).
+
+        Args:
+            qubit_indices: ``'all'`` to trace every qubit, or a list of
+                integer qubit indices.
+        """
+        if qubit_indices == 'all':
+            self.trace_qubits = set(self.qubit_indices)
+        else:
+            self.trace_qubits = set(qubit_indices)
+        # Invalidate compiled strategy caches.
+        for attr in list(vars(self)):
+            if attr.startswith('_compiled_strategy_'):
+                delattr(self, attr)
+
+    def clear_trace(self):
+        """Remove all trace marks and invalidate strategy caches."""
+        self.trace_qubits = set()
+        for attr in list(vars(self)):
+            if attr.startswith('_compiled_strategy_'):
+                delattr(self, attr)
+
+    # ================================================================
     # Chunk / Concat operations  (renamed from Split / Merge)
     # ================================================================
 
@@ -904,6 +936,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 cloned_qctn.cores_weights[core_name] = TNTensor(tensor).clone()
 
         cloned_qctn.core_names = dict(getattr(self, 'core_names', {}))
+        cloned_qctn.trace_qubits = set(getattr(self, 'trace_qubits', set()))
 
         # Clone submodules
         cloned_qctn._submodules = {}
