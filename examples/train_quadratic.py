@@ -136,8 +136,8 @@ def nll_loss(result, target, backend):
 # ---------------------------------------------------------------------------
 
 def main():
-    # backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-    backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
+    backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
+    # backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
     engine   = EngineCommon(backend=backend, strategy_mode="full")
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 

@@ -53,6 +53,23 @@ class TNTensor:
             name:          Optional name for debugging and visualization.
             _source_info:  Optional metadata about the tensor's origin (for debugging).
         """
+        # Auto-unwrap nested TNTensor to prevent double-wrapping.
+        # This can happen when backend.convert_to_tensor already returns
+        # a TNTensor and the caller wraps it again with TNTensor(...).
+        if isinstance(tensor, TNTensor):
+            # Merge scale factors.
+            scale = float(tensor.scale * scale)
+            # Inherit flags from inner when outer uses defaults.
+            if not has_batch:
+                has_batch = tensor.has_batch
+            if not is_ref:
+                is_ref = tensor.is_ref
+            if not is_transposed:
+                is_transposed = tensor.is_transposed
+            if source is None:
+                source = tensor.source
+            tensor = tensor._tensor
+
         self._tensor = tensor
         self.scale = float(scale)
         self.log_scale = (
@@ -80,6 +97,13 @@ class TNTensor:
             has_batch: If not None, overwrite the ``has_batch`` flag.
                        Passing ``True`` marks the first dimension as batch.
         """
+        # Unwrap nested TNTensor.
+        if isinstance(tensor, TNTensor):
+            scale = float(tensor.scale * scale)
+            if has_batch is None:
+                has_batch = tensor.has_batch
+            tensor = tensor._tensor
+
         self._tensor = tensor
         self.scale = float(scale)
         self.log_scale = (
