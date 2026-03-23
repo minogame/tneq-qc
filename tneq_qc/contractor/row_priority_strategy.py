@@ -337,6 +337,10 @@ def _contract_group(
     collected_in_edges = [(s, e) for s, e in collected_in_edges if s not in trace_summed]
     collected_out_edges = [(s, e) for s, e in collected_out_edges if s not in trace_summed]
 
+    # Sort by qubit index to guarantee consistent output dimension ordering
+    collected_in_edges.sort(key=lambda x: x[1]['qubit_idx'])
+    collected_out_edges.sort(key=lambda x: x[1]['qubit_idx'])
+
     output_symbols = []
     new_batch_symbol = ""
     if 'a' in batch_symbols:
@@ -428,16 +432,26 @@ def _contract_remaining(core_tensor_list: List[Dict], backend):
         tensor = tensors[len(parts)]
 
         if side == TensorSide.MIDDLE:
-            mx_shape = tensor.shape if not isinstance(tensor, TNTensor) else tensor.tensor.shape
-            batch_ndim = len(mx_shape) - 2
-            if batch_ndim >= 1:
-                part += 'a'
-            if batch_ndim >= 2:
-                part += 'b'
-            if entry['in_edge_list']:
-                part += entry['in_edge_list'][0]['symbol']
-            if entry['out_edge_list']:
-                part += entry['out_edge_list'][0]['symbol']
+            if entry.get('tensor_source') == 'merged':
+                # Merged entry from _contract_group: use full edge lists
+                batch_sym = entry.get('batch_symbol', '')
+                part = batch_sym
+                for edge in entry['in_edge_list']:
+                    part += edge['symbol']
+                for edge in entry['out_edge_list']:
+                    part += edge['symbol']
+            else:
+                # Original Mx: keep existing logic (batch + in + out)
+                mx_shape = tensor.shape if not isinstance(tensor, TNTensor) else tensor.tensor.shape
+                batch_ndim = len(mx_shape) - 2
+                if batch_ndim >= 1:
+                    part += 'a'
+                if batch_ndim >= 2:
+                    part += 'b'
+                if entry['in_edge_list']:
+                    part += entry['in_edge_list'][0]['symbol']
+                if entry['out_edge_list']:
+                    part += entry['out_edge_list'][0]['symbol']
 
         elif side == TensorSide.RIGHT:
             original_in_count = entry.get('original_in_edge_count', len(entry['out_edge_list']))
@@ -470,7 +484,22 @@ def _contract_remaining(core_tensor_list: List[Dict], backend):
     if any('b' in p for p in parts):
         batch_sym_out += 'b'
 
-    einsum_eq = ",".join(parts) + "->" + batch_sym_out
+    # Collect all boundary (open) symbols with metadata for sorting
+    all_boundary = []  # (symbol, qubit_idx, direction)
+    for entry in core_tensor_list:
+        for edge in entry['in_edge_list']:
+            if edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed'):
+                all_boundary.append((edge['symbol'], edge['qubit_idx'], 'in'))
+        for edge in entry['out_edge_list']:
+            if edge['neighbor_idx'] == -1 and not edge.get('is_trace_closed'):
+                all_boundary.append((edge['symbol'], edge['qubit_idx'], 'out'))
+
+    # Sort: in before out, then by qubit index
+    direction_order = {'in': 0, 'out': 1}
+    all_boundary.sort(key=lambda x: (direction_order[x[2]], x[1]))
+
+    rhs_symbols = batch_sym_out + ''.join(sym for sym, _, _ in all_boundary)
+    einsum_eq = ",".join(parts) + "->" + rhs_symbols
     einsum_eq = _remap_symbols(einsum_eq)
 
     # Handle TNTensor scale
