@@ -246,3 +246,44 @@ class DataGenerator:
             Mx_list.append(tmp)
 
         return Mx_list, out
+
+
+# ---------------------------------------------------------------------------
+# Factory helper for Trainer.fit(data_fn=...) (Phase 3.0)
+# ---------------------------------------------------------------------------
+
+def make_data_fn(
+    data_generator: DataGenerator,
+    qctn,
+    mx_core_names,
+    batch_size: int,
+    num_qubits: int,
+    K: int = 2,
+):
+    """Create a *data_fn* callable for :meth:`Trainer.fit`.
+
+    Each call generates a random batch, computes Hermite Mx matrices via
+    *data_generator*, and writes them into *qctn* in-place.
+
+    Args:
+        data_generator: :class:`DataGenerator` instance.
+        qctn: QCTN whose mx cores will be updated.
+        mx_core_names: Readable names of the mx cores to update.
+        batch_size: Number of samples per step.
+        num_qubits: Data dimensionality (D).
+        K: Hermite polynomial order.
+
+    Returns:
+        Callable ``(step: int) -> None`` suitable for ``Trainer.fit(data_fn=...)``.
+    """
+
+    def data_fn(step: int) -> None:
+        x = np.random.uniform(-1.0, 1.0, size=(batch_size, num_qubits)).astype(
+            np.float32
+        )
+        Mx_list, _ = data_generator.generate(x, K=K, ret_type="TNTensor")
+        for i, name in enumerate(mx_core_names):
+            qctn[name] = Mx_list[i]
+
+    return data_fn
+

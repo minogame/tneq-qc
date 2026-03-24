@@ -346,6 +346,56 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         return '\n'.join(lines)
 
     # ================================================================
+    # Parameter collection (Phase 3.0)
+    # ================================================================
+
+    def parameters(self):
+        """Return all trainable leaf TNTensor parameters.
+
+        Collects cores where ``requires_grad=True`` and ``is_leaf=True``.
+        Non-leaf derived tensors (e.g. conj/permute views from
+        :meth:`hermit`) are skipped — autograd propagates their gradients
+        back to the originating leaf tensors automatically.
+
+        Returns:
+            list[TNTensor]: Trainable parameters in ``self.cores`` order.
+        """
+        result = []
+        for c_name in self.cores:
+            c = self.cores_weights.get(c_name)
+            if c is None:
+                continue
+            if not c.requires_grad:
+                continue
+            if not c.is_leaf:
+                continue
+            result.append(c)
+        return result
+
+    def named_parameters(self):
+        """Return ``(name, tensor)`` pairs for all trainable leaf parameters.
+
+        Uses the readable name from ``core_names`` when available,
+        otherwise falls back to the einsum symbol.
+
+        Returns:
+            list[tuple[str, TNTensor]]: ``(name, tensor)`` pairs.
+        """
+        names = getattr(self, 'core_names', {})
+        result = []
+        for c_name in self.cores:
+            c = self.cores_weights.get(c_name)
+            if c is None:
+                continue
+            if not c.requires_grad:
+                continue
+            if not c.is_leaf:
+                continue
+            readable = names.get(c_name, c_name)
+            result.append((readable, c))
+        return result
+
+    # ================================================================
     # nn.Module-style interface
     # ================================================================
 
