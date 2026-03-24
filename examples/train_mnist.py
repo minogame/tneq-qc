@@ -2,12 +2,13 @@ import torch
 import numpy as np
 from PIL import Image
 from torchvision import datasets, transforms
-from tqdm import tqdm
 from tneq_qc.backends.backend_factory import BackendFactory
 from tneq_qc.core.qctn import QCTN
 from tneq_qc.core.tn_tensor import TNTensor
 from tneq_qc.utils.graph_generators import QCTNHelper
 from tneq_qc.core.engine_common import EngineCommon
+from tneq_qc.optim import Adam
+from tneq_qc.trainer import Trainer, TrainConfig
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ def init_model1_from_image(graph: str, image_tensor, backend):
     if core_name not in qctn.cores_weights:
         return qctn
 
-    shape = qctn.cores_weights[core_name].tensor.shape
+    shape = qctn.cores_weights[core_name].shape
     total = 1
     for d in shape:
         total *= d
@@ -61,8 +62,7 @@ def print_qctn_info(qctn, label: str = "QCTN"):
     print("  Core shapes:")
     for c in qctn.cores:
         t = qctn.cores_weights[c]
-        rg = t.tensor.requires_grad
-        print(f"    '{c}' shape={tuple(t.tensor.shape)}  requires_grad={rg}")
+        print(f"    '{c}' shape={tuple(t.shape)}  requires_grad={t.requires_grad}")
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,6 @@ if __name__ == "__main__":
 
     model1 = init_model1_from_image(graph1, mnist_image, backend)
     print_qctn_info(model1, label="Model 1")
-    # exit()
 
     # ------------------------------------------------------------------
     # Model 2: MPS 结构，自动正交初始化，全部 core 参与训练
@@ -112,14 +111,13 @@ if __name__ == "__main__":
     print("=" * 60)
 
     graph2 = QCTNHelper.brickwall(N_QUBITS, n_layers=N_LAYERS, phys_dim=PHYS_DIM)
-    
+
     graph2 = "-2-A-2-\n-2-A-2-\n-2-A-2-\n-2-A-2-\n-2-A-2-"
     print(f"graph2: \n{graph2}")
 
     model2 = QCTN(graph2, backend=backend)
 
     print(f"model2: \n{model2}")
-    # exit()
 
     model2.auto_init()
 
@@ -127,51 +125,23 @@ if __name__ == "__main__":
         core = model2.cores_weights[c]
         noise = torch.randn_like(core.tensor) * 0.01
         core.set(core.tensor + noise, core.scale)
-        core.tensor.requires_grad_(True)
-        # model2.cores_weights[c].tensor.requires_grad_(True)
+        core.requires_grad_(True)
 
     print_qctn_info(model2, label="Model 2")
+    print(f"\nTrainable cores: {len(model2.parameters())}")
 
     # ------------------------------------------------------------------
-    # 收集 model2 的可训练参数（model1 固定，仅作 target 使用）
-    # ------------------------------------------------------------------
-    def _raw(t):
-        return t.tensor if isinstance(t, TNTensor) else t
-
-    trainable_cores = [c for c in model2.cores if _raw(model2.cores_weights[c]).requires_grad]
-    params = [model2.cores_weights[c] for c in trainable_cores]
-    print(f"\nTrainable cores: {trainable_cores}  ({len(params)} tensors)")
-
-    # ------------------------------------------------------------------
-    # 训练循环
+    # 训练
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
     print(f"Training  epochs={N_EPOCHS}  lr={LR}  optimizer=Adam")
     print("=" * 60)
 
-    optimizer_state: dict = {}
-    loss_history = []
-
-    for epoch in tqdm(range(1, N_EPOCHS + 1)):
-
-        # 前向 + 反向：以 model1 的 contract 结果为 target，用 MSE loss
-        loss, grads = engine.contract_with_compiled_strategy_for_gradient(
-            model2, target=model1, loss='mse'
-        )
-
-        # 参数更新（原地修改 TNTensor，combined.cores_weights 自动反映）
-        params, optimizer_state = backend.optimizer_update(
-            params, list(grads), optimizer_state,
-            method='adam',
-            hyperparams={'learning_rate': LR, 'iter': epoch - 1},
-        )
-
-        loss_val = loss.item() if hasattr(loss, 'item') else float(loss)
-        loss_history.append(loss_val)
-
-        if epoch % LOG_EVERY == 0 or epoch == 1:
-            print(f"  Epoch {epoch:4d}/{N_EPOCHS}  loss={loss_val:.6f}")
+    optimizer = Adam(model2.parameters(), backend, lr=LR)
+    trainer = Trainer(engine, model2, optimizer,
+        TrainConfig(max_steps=N_EPOCHS, log_every=LOG_EVERY))
+    loss_history = trainer.fit(target=model1, loss='mse')
 
     # ------------------------------------------------------------------
     # 训练结果
@@ -184,11 +154,9 @@ if __name__ == "__main__":
     print(f"  Loss reduced : {loss_history[0] - loss_history[-1]:.6f}")
 
     print("\nFinal gradient norms (last backward pass):")
-    for c in model2.cores:
-        core = model2.cores_weights[c]
-        raw = core.tensor if isinstance(core, TNTensor) else core
-        if raw.grad is not None:
-            print(f"  '{c}' grad_norm={raw.grad.norm().item():.6f}")
+    for name, p in model2.named_parameters():
+        if p.grad is not None:
+            print(f"  '{name}' grad_norm={p.grad.norm().item():.6f}")
     print("=" * 60)
 
     # ------------------------------------------------------------------

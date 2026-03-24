@@ -19,14 +19,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import numpy as np
-from tqdm import tqdm
 
 from tneq_qc.backends.backend_factory import BackendFactory
 from tneq_qc.core.qctn import QCTN
 from tneq_qc.core.tn_tensor import TNTensor
 from tneq_qc.core.engine_common import EngineCommon
 from tneq_qc.utils.graph_generators import QCTNHelper
-from tneq_qc.utils.data_generator import DataGenerator
+from tneq_qc.utils.data_generator import DataGenerator, make_data_fn
+from tneq_qc.optim import SGDG
+from tneq_qc.trainer import Trainer, TrainConfig
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
@@ -47,23 +48,12 @@ np.random.seed(42)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _raw(t):
-    """Return the underlying backend tensor regardless of TNTensor wrapping."""
-    return t.tensor if isinstance(t, TNTensor) else t
-
-
-def _is_trainable_leaf(t):
-    """True iff this core is a leaf tensor that requires gradient."""
-    raw = _raw(t)
-    return raw.requires_grad and (not hasattr(raw, 'is_leaf') or raw.is_leaf)
-
-
 def init_circuit_01(qctn: QCTN, backend) -> QCTN:
     """Fill each circuit core with an alternating 0/1 pattern."""
     for c in qctn.cores:
         core = qctn.cores_weights[c]
-        shape = tuple(core.tensor.shape) if isinstance(core, TNTensor) else tuple(core.shape)
-        dtype = core.tensor.dtype if isinstance(core, TNTensor) else core.dtype
+        shape = tuple(core.shape)
+        dtype = core.dtype
         n = 1
         for d in shape:
             n *= d
@@ -79,10 +69,9 @@ def print_qctn_info(qctn: QCTN, label: str = "QCTN"):
     print("  Core shapes (requires_grad / is_leaf):")
     for c in qctn.cores:
         t = qctn.cores_weights[c]
-        raw = _raw(t)
-        shape = tuple(raw.shape)
-        rg    = raw.requires_grad
-        leaf  = getattr(raw, 'is_leaf', '?')
+        shape = tuple(t.shape)
+        rg    = t.requires_grad
+        leaf  = t.is_leaf
         print(f"    '{c}': {shape}  requires_grad={rg}  is_leaf={leaf}")
 
 
@@ -93,17 +82,13 @@ def print_qctn_info(qctn: QCTN, label: str = "QCTN"):
 def nll_loss(result, target, backend):
     """NLL loss: -mean(log(P) + log_scale).
 
-    Mirrors engine_siamese.py's commented-out NLL path:
-        log_total = log_result + log_scale
-        loss = -mean(target * log_total)
-
     Key design choices:
     - Use result.tensor (raw, without scale) for Born rule → avoids
       scale² amplification that drove p→0 and caused 23.025850 spikes.
     - Add log_scale (detached) as a constant correction term so the
       full log-probability log(P·scale) is properly accounted for.
     - target (label) is ignored; task is generative (maximize P for all
-      data), so target is always 1 — identical to engine_siamese.py.
+      data), so target is always 1.
     """
     # ① raw tensor + log_scale (detached constant)
     if isinstance(result, TNTensor):
@@ -157,7 +142,7 @@ def main():
     graph_mps = QCTNHelper.mps(N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM)
     mps = QCTN(graph_mps, backend=backend).auto_init()
     for c in mps.cores:
-        _raw(mps.cores_weights[c]).requires_grad_(True)
+        mps.cores_weights[c].requires_grad_(True)
     print_qctn_info(mps, "MPS (trainable)")
 
     # ------------------------------------------------------------------
@@ -177,13 +162,12 @@ def main():
     for c in circuit.cores:
         t = circuit.cores_weights[c]
         circ_bra.cores_weights[c] = TNTensor(
-            t.tensor.conj() if isinstance(t, TNTensor) else t.conj(),
-            scale=t.scale if isinstance(t, TNTensor) else 1.0,
+            t.tensor.conj(),
+            scale=t.scale,
         )
     for core in circ_bra.cores:
         print(f"    {core}: {circ_bra.cores_weights[core].tensor}")
 
-    # combined = QCTN.concat([circuit, mps, mx, mps_h, circ_bra])
     combined = QCTN.concat([
         ('cs', circuit),
         ('mps', mps),
@@ -196,19 +180,10 @@ def main():
     print(f"combined.core_weights: {combined.cores_weights}")
     print(f"combined.core_names: {combined.core_names}")
     print(f"combined: {repr(combined)}")
-    # exit()
-    # ------------------------------------------------------------------
-    # 5. Collect trainable params from combined (leaf cores only)
-    #    Must match the order the engine collects them.
-    # ------------------------------------------------------------------
-    params = [
-        combined.cores_weights[c]
-        for c in combined.cores
-        if _is_trainable_leaf(combined.cores_weights[c])
-    ]
-    print(f"\nTrainable cores: {len(params)}")
 
-    # Pre-collect mx readable names for inplace update via combined['mx.X'].
+    print(f"\nTrainable cores: {len(combined.parameters())}")
+
+    # Pre-collect mx readable names for data_fn
     mx_readable_names = [
         combined.core_names[sym]
         for sym in combined.cores
@@ -216,7 +191,7 @@ def main():
     ]
 
     # ------------------------------------------------------------------
-    # 6. Verify one forward pass before training
+    # 5. Verify one forward pass before training
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
@@ -230,51 +205,23 @@ def main():
         print(f"  result={result}")
 
     # ------------------------------------------------------------------
-    # 7. Training loop
+    # 6. Training
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
     print(f"Training  steps={N_STEPS}  batch={BATCH_SIZE}  lr={LR}  optimizer=SGDG  loss=CE")
     print("=" * 60)
 
-    optimizer_state: dict = {}
-    loss_history = []
+    optimizer = SGDG(combined.parameters(), backend, lr=LR)
+    data_fn = make_data_fn(data_gen, combined, mx_readable_names,
+                           batch_size=BATCH_SIZE, num_qubits=N_QUBITS, K=PHYS_DIM)
 
-    for step in tqdm(range(1, N_STEPS + 1)):
+    save_path = f"checkpoints/quadratic_{N_QUBITS}q_K{PHYS_DIM}_B{BOND_DIM}.safetensors"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        # ---- Generate training batch --------------------------------
-        # x shape: [BATCH_SIZE, N_QUBITS]
-        x = np.random.uniform(-1.0, 1.0, size=(BATCH_SIZE, N_QUBITS)).astype(np.float32)
-        y = 1
-
-        # ---- Generate Mx from x via DataGenerator -------------------
-        # Mx_list: N_QUBITS TNTensors, each of shape [BATCH_SIZE, K, K],
-        # with has_batch=True so build_graph injects 'a' into einsum.
-        Mx_list, _ = data_gen.generate(x, K=PHYS_DIM, ret_type='TNTensor')
-
-        # ---- Update mx cores inplace via combined['mx.X'] -------------
-        for i, name in enumerate(mx_readable_names):
-            combined[name] = Mx_list[i]
-
-        # ---- Forward + backward ------------------------------------
-        loss_tensor, grads = engine.contract_with_compiled_strategy_for_gradient(
-            combined,
-            target=y,
-            loss=nll_loss,
-        )
-
-        # ---- Parameter update (SGDG) --------------------------------
-        params, optimizer_state = backend.optimizer_update(
-            params, list(grads), optimizer_state,
-            method='sgdg',
-            hyperparams={'learning_rate': LR},
-        )
-
-        loss_val = loss_tensor.item() if hasattr(loss_tensor, 'item') else float(loss_tensor)
-        loss_history.append(loss_val)
-
-        if step % LOG_EVERY == 0 or step == 1:
-            print(f"  Step {step:4d}/{N_STEPS}  loss={loss_val:.6f}  y={y:.1f}")
+    trainer = Trainer(engine, combined, optimizer,
+        TrainConfig(max_steps=N_STEPS, log_every=LOG_EVERY, save_path=save_path))
+    loss_history = trainer.fit(target=1, loss=nll_loss, data_fn=data_fn)
 
     # ------------------------------------------------------------------
     # Summary
@@ -286,19 +233,6 @@ def main():
     print(f"  Final   loss : {loss_history[-1]:.6f}")
     print(f"  Loss reduced : {loss_history[0] - loss_history[-1]:.6f}")
     print("=" * 60)
-
-    # ------------------------------------------------------------------
-    # 8. Save trained cores
-    # ------------------------------------------------------------------
-    save_path = f"checkpoints/quadratic_{N_QUBITS}q_K{PHYS_DIM}_B{BOND_DIM}.safetensors"
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    combined.save_cores(save_path, metadata={
-        'n_qubits': str(N_QUBITS),
-        'bond_dim': str(BOND_DIM),
-        'phys_dim': str(PHYS_DIM),
-        'n_steps': str(N_STEPS),
-        'final_loss': f"{loss_history[-1]:.6f}",
-    })
     print(f"  Saved to: {save_path}")
     print(f"  Core names: {combined.core_names}")
 
