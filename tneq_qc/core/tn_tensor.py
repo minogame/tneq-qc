@@ -373,6 +373,57 @@ class TNTensor:
         return TNTensor(raw_new, scale=self.scale, log_scale=self.log_scale)
 
     # ------------------------------------------------------------------
+    # Indexing / slicing
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, key) -> "TNTensor":
+        """Index / slice the underlying tensor; scale is preserved."""
+        return TNTensor(self._tensor[key], scale=self.scale, log_scale=self.log_scale)
+
+    def __setitem__(self, key, value):
+        """In-place element assignment. *value* may be TNTensor or raw tensor."""
+        if isinstance(value, TNTensor):
+            self._tensor[key] = value._tensor
+        else:
+            self._tensor[key] = value
+
+    # ------------------------------------------------------------------
+    # Gradient proxy properties (PyTorch-aware)
+    # ------------------------------------------------------------------
+
+    @property
+    def requires_grad(self) -> bool:
+        return getattr(self._tensor, "requires_grad", False)
+
+    def requires_grad_(self, requires_grad: bool = True) -> "TNTensor":
+        if hasattr(self._tensor, "requires_grad_"):
+            self._tensor.requires_grad_(requires_grad)
+        return self
+
+    @property
+    def grad(self):
+        return getattr(self._tensor, "grad", None)
+
+    @property
+    def is_leaf(self) -> bool:
+        return getattr(self._tensor, "is_leaf", True)
+
+    @property
+    def grad_fn(self):
+        return getattr(self._tensor, "grad_fn", None)
+
+    def detach(self) -> "TNTensor":
+        """Return a detached copy (no computation graph)."""
+        raw = self._tensor
+        if hasattr(raw, "detach"):
+            raw = raw.detach()
+        return TNTensor(raw, scale=self.scale, log_scale=self.log_scale)
+
+    def backward(self, *args, **kwargs):
+        """Proxy backward to the underlying tensor (PyTorch only)."""
+        self._tensor.backward(*args, **kwargs)
+
+    # ------------------------------------------------------------------
     # Arithmetic – scale propagation rules
     #
     #   (a * sa) @ (b * sb)  =  (a @ b) * (sa * sb)
@@ -421,20 +472,83 @@ class TNTensor:
             raise ZeroDivisionError
         return TNTensor(self._tensor, scale=self.scale / factor)
 
-    def __add__(self, other: "TNTensor") -> "TNTensor":
-        """Element-wise add two TNTensors.
+    def __add__(self, other) -> "TNTensor":
+        """Element-wise add. *other* may be TNTensor, raw tensor, or scalar."""
+        if isinstance(other, TNTensor):
+            if self.scale == other.scale:
+                return TNTensor(self._tensor + other._tensor, scale=self.scale)
+            factor = other.scale / self.scale
+            return TNTensor(self._tensor + other._tensor * factor, scale=self.scale)
+        # scalar 0: identity (supports sum([tn1, tn2, ...]))
+        if not hasattr(other, "shape") and other == 0:
+            return self
+        # raw tensor or scalar: expand self first
+        return TNTensor(self._tensor * self.scale + other, scale=1.0)
 
-        Both are normalised to ``self.scale`` to keep the result accurate.
-        """
-        if not isinstance(other, TNTensor):
-            raise TypeError(f"Expected TNTensor, got {type(other)}")
-        if self.scale == other.scale:
-            return TNTensor(self._tensor + other._tensor, scale=self.scale)
-        factor = other.scale / self.scale
-        return TNTensor(self._tensor + other._tensor * factor, scale=self.scale)
+    def __radd__(self, other) -> "TNTensor":
+        """Support ``0 + tn`` (used by built-in ``sum()``)."""
+        return self.__add__(other)
+
+    def __sub__(self, other) -> "TNTensor":
+        """Element-wise subtract. *other* may be TNTensor, raw tensor, or scalar."""
+        if isinstance(other, TNTensor):
+            if self.scale == other.scale:
+                return TNTensor(self._tensor - other._tensor, scale=self.scale)
+            factor = other.scale / self.scale
+            return TNTensor(self._tensor - other._tensor * factor, scale=self.scale)
+        if hasattr(other, "shape"):
+            return TNTensor(self._tensor * self.scale - other, scale=1.0)
+        return TNTensor(self._tensor * self.scale - float(other), scale=1.0)
+
+    def __rsub__(self, other) -> "TNTensor":
+        """``scalar - tn``."""
+        return TNTensor(other - self._tensor * self.scale, scale=1.0)
 
     def __neg__(self) -> "TNTensor":
         return TNTensor(self._tensor, scale=-self.scale)
+
+    def __abs__(self) -> "TNTensor":
+        """``abs(tn)`` — element-wise absolute value, scale takes abs."""
+        raw = self._tensor.abs() if hasattr(self._tensor, "abs") else abs(self._tensor)
+        return TNTensor(raw, scale=abs(self.scale))
+
+    def __pow__(self, exponent) -> "TNTensor":
+        """``tn ** n`` — ``(tensor * scale) ** n = tensor**n * scale**n``."""
+        n = float(exponent)
+        return TNTensor(self._tensor ** exponent, scale=self.scale ** n)
+
+    # ------------------------------------------------------------------
+    # Comparison – expand to logical value (tensor * scale) before compare
+    # ------------------------------------------------------------------
+
+    def _cmp_val(self, other):
+        """Return (self_expanded, other_expanded) for comparison."""
+        self_val = self._tensor * self.scale
+        if isinstance(other, TNTensor):
+            return self_val, other._tensor * other.scale
+        return self_val, other
+
+    def __lt__(self, other):
+        a, b = self._cmp_val(other)
+        return a < b
+
+    def __le__(self, other):
+        a, b = self._cmp_val(other)
+        return a <= b
+
+    def __gt__(self, other):
+        a, b = self._cmp_val(other)
+        return a > b
+
+    def __ge__(self, other):
+        a, b = self._cmp_val(other)
+        return a >= b
+
+    def __eq__(self, other):
+        if not isinstance(other, TNTensor) and not hasattr(other, 'shape'):
+            return NotImplemented
+        a, b = self._cmp_val(other)
+        return a == b
 
     def sum(self, dim=None, keepdim: bool = False) -> "TNTensor":
         """Sum elements along *dim*; scale is preserved."""
@@ -486,6 +600,119 @@ class TNTensor:
                     raw_result = np.einsum(equation, *raw_tensors)
 
         return TNTensor(raw_result, scale=result_scale)
+
+    # ------------------------------------------------------------------
+    # Utility methods – common tensor operations
+    # ------------------------------------------------------------------
+
+    def item(self) -> float:
+        """Return scalar value as Python float (includes scale)."""
+        raw_val = self._tensor.item() if hasattr(self._tensor, "item") else float(self._tensor)
+        return raw_val * self.scale
+
+    def numpy(self):
+        """Return numpy array of the *logical* value (tensor * scale)."""
+        import numpy as np
+        raw = self._tensor
+        if hasattr(raw, "detach"):
+            raw = raw.detach().cpu().numpy()
+        elif not isinstance(raw, np.ndarray):
+            raw = np.asarray(raw)
+        return raw * self.scale
+
+    def contiguous(self) -> "TNTensor":
+        """Return contiguous-memory copy (PyTorch) or self (others)."""
+        if hasattr(self._tensor, "contiguous"):
+            return TNTensor(self._tensor.contiguous(), scale=self.scale, log_scale=self.log_scale)
+        return self
+
+    def abs(self) -> "TNTensor":
+        """Element-wise absolute value; scale takes abs."""
+        raw = self._tensor.abs() if hasattr(self._tensor, "abs") else abs(self._tensor)
+        return TNTensor(raw, scale=abs(self.scale))
+
+    def max(self, dim=None, keepdim=False):
+        """Max along *dim*; scale is preserved.
+
+        When *dim* is None returns a scalar TNTensor.
+        When *dim* is given, returns ``(values, indices)`` like PyTorch.
+        """
+        raw = self._tensor
+        if dim is None:
+            result = raw.max()
+            return TNTensor(result, scale=self.scale, log_scale=self.log_scale)
+        # PyTorch returns (values, indices)
+        out = raw.max(dim=dim, keepdim=keepdim)
+        if isinstance(out, tuple):
+            return (TNTensor(out[0], scale=self.scale, log_scale=self.log_scale), out[1])
+        return TNTensor(out, scale=self.scale, log_scale=self.log_scale)
+
+    def min(self, dim=None, keepdim=False):
+        """Min along *dim*; scale is preserved."""
+        raw = self._tensor
+        if dim is None:
+            result = raw.min()
+            return TNTensor(result, scale=self.scale, log_scale=self.log_scale)
+        out = raw.min(dim=dim, keepdim=keepdim)
+        if isinstance(out, tuple):
+            return (TNTensor(out[0], scale=self.scale, log_scale=self.log_scale), out[1])
+        return TNTensor(out, scale=self.scale, log_scale=self.log_scale)
+
+    def unsqueeze(self, dim) -> "TNTensor":
+        """Insert a size-1 dimension at *dim*."""
+        return TNTensor(self._tensor.unsqueeze(dim), scale=self.scale, log_scale=self.log_scale)
+
+    def squeeze(self, dim=None) -> "TNTensor":
+        """Remove size-1 dimensions."""
+        if dim is None:
+            return TNTensor(self._tensor.squeeze(), scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(self._tensor.squeeze(dim), scale=self.scale, log_scale=self.log_scale)
+
+    def view(self, *shape) -> "TNTensor":
+        """PyTorch-style view (same as reshape)."""
+        return self.reshape(shape)
+
+    def permute(self, *dims) -> "TNTensor":
+        """PyTorch-style permute (same as transpose with dims)."""
+        return self.transpose(*dims)
+
+    def expand(self, *sizes) -> "TNTensor":
+        """Expand tensor to a larger size (PyTorch-style broadcast)."""
+        return TNTensor(self._tensor.expand(*sizes), scale=self.scale, log_scale=self.log_scale)
+
+    def cpu(self) -> "TNTensor":
+        """Move to CPU."""
+        return self.to(device="cpu")
+
+    # ------------------------------------------------------------------
+    # Type conversions
+    # ------------------------------------------------------------------
+
+    def __float__(self) -> float:
+        """Scalar TNTensor → Python float (includes scale)."""
+        return self.item()
+
+    def __len__(self) -> int:
+        return len(self._tensor)
+
+    def __iter__(self):
+        """Iterate along dim 0, yielding TNTensors."""
+        for i in range(len(self._tensor)):
+            yield TNTensor(self._tensor[i], scale=self.scale, log_scale=self.log_scale)
+
+    def float(self) -> "TNTensor":
+        """Cast to float32."""
+        raw = self._tensor
+        if hasattr(raw, "float"):
+            return TNTensor(raw.float(), scale=self.scale, log_scale=self.log_scale)
+        return self.to(dtype="float32")
+
+    def double(self) -> "TNTensor":
+        """Cast to float64."""
+        raw = self._tensor
+        if hasattr(raw, "double"):
+            return TNTensor(raw.double(), scale=self.scale, log_scale=self.log_scale)
+        return self.to(dtype="float64")
 
     # ------------------------------------------------------------------
     # Representation

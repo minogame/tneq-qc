@@ -960,6 +960,8 @@ class EngineSiamese:
             
             persistent_measures[q_idx] = Mx_y
             
+        if isinstance(samples, TNTensor):
+            return samples.tensor
         return samples
 
 
