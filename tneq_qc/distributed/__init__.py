@@ -31,18 +31,6 @@ from .comm import (
     MockMPIBackend,
 )
 
-# Data parallel (legacy, kept for backward compat)
-from .parallel import (
-    DataParallelTrainer,
-    TrainingConfig,
-    TrainingStats,
-    ModelParallelManager,
-    ModelParallelTrainer,
-    ModelParallelConfig,
-    CorePartition,
-    create_model_parallel_trainer,
-)
-
 # Distributed engine
 from .engine import EngineDistributed, DistributedEngineSiamese
 from .engine.distributed_engine import (
@@ -69,10 +57,6 @@ __all__ = [
     'CommTorch', 'MockCommTorch', 'get_comm_torch',
     'get_comm_backend', 'get_auto_backend',
     'MPIBackend', 'MockMPIBackend',
-    # Data Parallel (legacy)
-    'DataParallelTrainer', 'TrainingConfig', 'TrainingStats',
-    'ModelParallelManager', 'ModelParallelTrainer', 'ModelParallelConfig',
-    'CorePartition', 'create_model_parallel_trainer',
     # Engine
     'EngineDistributed', 'DistributedEngineSiamese',
     'PartitionConfig', 'ContractStage', 'DistributedContractPlan',

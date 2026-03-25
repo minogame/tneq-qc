@@ -13,7 +13,7 @@ from typing import Callable, Optional, Union, List, Tuple, Dict, Any
 
 from tqdm import tqdm
 
-from ..contractor import EinsumStrategy, StrategyCompiler, GreedyStrategy
+from ..contractor import EinsumStrategy, StrategyCompiler
 from ..backends.backend_factory import BackendFactory, ComputeBackend
 from .tn_tensor import TNTensor
 from ..losses import LossRegistry, TargetResolver

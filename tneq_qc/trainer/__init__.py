@@ -1,10 +1,3 @@
-"""TNEQ-QC Trainer (Phase 3.0)."""
+"""TNEQ-QC Trainer (deprecated, use direct training loops)."""
 
-from .trainer import Trainer, TrainConfig, Callback, TqdmCallback
-
-__all__ = [
-    "Trainer",
-    "TrainConfig",
-    "Callback",
-    "TqdmCallback",
-]
+__all__ = []

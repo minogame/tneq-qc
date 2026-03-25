@@ -4,7 +4,7 @@ Row-priority contraction strategy.
 This module provides the RowPriorityStrategy class, which processes qubits
 one by one (row-by-row) using symmetric expansion: L cores, Mx, R cores.
 
-Unlike GreedyStrategy, the graph construction and wiring logic lives in
+The graph construction and wiring logic lives in
 QCTN.build_graph().  This strategy only handles the
 per-qubit contraction (Stage 3) and result assembly (Stage 4).
 
