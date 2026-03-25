@@ -137,21 +137,34 @@ class MAELoss(BaseLoss):
 
 @register_loss('nll')
 class NLLLoss(BaseLoss):
-    """Negative Log Likelihood for classification.
+    """Negative Log Likelihood for generative / classification tasks.
 
-    Assumes *result* represents (unnormalised) log-probabilities or a
-    probability distribution, and *target* is a one-hot or soft label.
-
-    ``loss = -mean(target * log(result + ε))``
+    Handles TNTensor log_scale correction and complex Born rule:
+    1. Extract raw tensor and log_scale from TNTensor.
+    2. For complex tensors, apply Born rule: P = |W|^2.
+    3. Compute -mean(log(P) + log_scale).
     """
 
     EPS: float = 1e-10
 
     def compute(self, result: Any, target: Any, backend: Any) -> Any:
-        eff_r = _real_effective(result, backend)
-        eff_t = _real_effective(target, backend)
-        log_p = backend.log(eff_r + self.EPS)
-        return -backend.mean(eff_t * log_p)
+        from ..core.tn_tensor import TNTensor
+
+        if isinstance(result, TNTensor):
+            raw = result.tensor
+            log_scale = result.log_scale
+        else:
+            raw = result
+            log_scale = 0.0
+
+        if backend.is_complex(raw):
+            p = backend.real(backend.abs_square(raw))
+        else:
+            p = raw
+
+        p = backend.clamp(p, min=self.EPS)
+        log_p = backend.log(p) + log_scale
+        return -backend.mean(log_p)
 
 
 # ======================================================================

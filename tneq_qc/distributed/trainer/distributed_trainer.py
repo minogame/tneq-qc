@@ -22,8 +22,8 @@ from typing import List, Dict, Tuple, Optional, Any, Union, TYPE_CHECKING
 from ..comm import CommBase, get_comm_backend, ReduceOp
 from ..parallel.data_parallel import DataParallelTrainer, TrainingConfig, TrainingStats
 from ..engine.distributed_engine import (
-    DistributedEngineSiamese, 
-    PartitionConfig, 
+    EngineDistributed,
+    PartitionConfig,
     DistributedContractPlan
 )
 
@@ -55,11 +55,14 @@ class DistributedConfig:
     mx_K: int = 100
     
     # ==================== QCTN Configuration ====================
-    
-    # QCTN graph string
+
+    # Pre-built QCTN object (preferred — preserves weights, requires_grad, etc.)
+    qctn: Optional['QCTN'] = None
+
+    # QCTN graph string (fallback if qctn is None)
     qctn_graph: Optional[str] = None
-    
-    # Number of qubits (used if qctn_graph is None)
+
+    # Number of qubits (used if both qctn and qctn_graph are None)
     num_qubits: int = 4
     
     # ==================== Communication Configuration ====================
@@ -225,10 +228,9 @@ class DistributedTrainer:
         # Initialize distributed engine with partitioning config
         partition_config = self.config.to_partition_config(self.comm.world_size)
         
-        self.engine = DistributedEngineSiamese(
+        self.engine = EngineDistributed(
             backend=self.config.backend_type,
             strategy_mode=self.config.strategy_mode,
-            mx_K=self.config.mx_K,
             comm=self.comm,
             partition_config=partition_config,
         )
@@ -288,58 +290,60 @@ class DistributedTrainer:
             print(f"[DistributedTrainer] {msg}")
     
     def _init_qctn(self):
-        """Initialize QCTN model on each process independently."""
-        from ...core.qctn import QCTN, QCTNHelper
-        
+        """Initialize QCTN model on each process.
+
+        If config.qctn is provided (a pre-built QCTN object), use it directly.
+        This preserves user-set weights, requires_grad, hermit refs, etc.
+        Otherwise, fall back to creating a new QCTN from config.qctn_graph.
+        """
+        from ...core.qctn import QCTN
+        from ...utils.graph_generators import QCTNHelper
+
+        if self.config.qctn is not None:
+            # Use the pre-built QCTN directly (preserves weights + requires_grad)
+            self.qctn = self.config.qctn
+            self._log(f"Using pre-built QCTN: {self.qctn.nqubits} qubits, {len(self.qctn.cores)} cores")
+            return
+
         qctn_graph = self.config.qctn_graph
-        
+
         if qctn_graph is None:
             # Use default example graph based on num_qubits
             qctn_graph = QCTNHelper.generate_example_graph(n=self.config.num_qubits)
             self._log(f"Using default QCTN graph with {self.config.num_qubits} qubits")
-        
+
         # Each process creates its own QCTN instance independently
         self.qctn = QCTN(qctn_graph, backend=self.engine.backend)
         self._log(f"QCTN initialized: {self.qctn.nqubits} qubits, {len(self.qctn.cores)} cores")
-        
-        # Note: Weights are initialized independently on each process.
-        # The engine's init_distributed will handle partitioning and
-        # each process will only keep its local subgraph.
     
     def _sync_model_weights(self):
         """
         Synchronize model weights from main process to all workers.
-        
+
         Note: This method is currently not used in the default initialization flow.
         Each process initializes QCTN independently and engine.init_distributed()
         handles partitioning. This method is kept for cases where explicit
         weight synchronization is needed (e.g., after modifying weights on rank 0).
         """
         from ...core.tn_tensor import TNTensor
-        
+
         if self.comm.world_size == 1:
             return
-        
+
         for core_name in self.qctn.cores:
             if core_name not in self.qctn.cores_weights:
                 continue
             weight = self.qctn.cores_weights[core_name]
-            
-            # Handle TNTensor objects
+
+            # Handle TNTensor objects (use transparent proxy .is_leaf check)
             if isinstance(weight, TNTensor):
-                # Broadcast the underlying tensor directly (no numpy conversion)
                 synced_tensor = self.comm.broadcast_object(weight.tensor, src=0)
-                
-                # Broadcast the scale factor
                 synced_scale = self.comm.broadcast_object(weight.scale, src=0)
-                
-                # Reconstruct TNTensor
                 self.qctn.cores_weights[core_name] = TNTensor(synced_tensor, synced_scale)
             else:
-                # Regular tensor - broadcast directly
                 synced_weight = self.comm.broadcast_object(weight, src=0)
                 self.qctn.cores_weights[core_name] = synced_weight
-        
+
         self._log("Model weights synchronized across workers")
     
     # ==================== Data Preparation ====================
@@ -463,14 +467,19 @@ class DistributedTrainer:
         import time
         
         from ..optim.distributed_sgdg import DistributedSGDG, LRScheduler
-        
+
         if num_epochs is None:
             num_epochs = self.config.max_steps
         if log_interval is None:
             log_interval = self.config.log_interval
-        
-        # Create distributed SGDG optimizer
+
+        # Collect trainable params from local QCTN partition
+        local_qctn = self.engine._local_qctn
+        local_params = list(local_qctn.cores_weights.values())
+
+        # Create distributed SGDG optimizer with params list (Phase 4.0 API)
         optimizer = DistributedSGDG(
+            params=local_params,
             lr=self.config.learning_rate,
             momentum=self.config.momentum,
             stiefel=self.config.stiefel,
@@ -545,7 +554,128 @@ class DistributedTrainer:
             self._save_final_model()
         
         return stats
-    
+
+    # ==================== Trainer-compatible API (Phase 4.0) ====================
+
+    def fit(
+        self,
+        target=None,
+        loss=None,
+        data_fn=None,
+    ) -> List[float]:
+        """Execute distributed training with single-process Trainer-compatible API.
+
+        Data is managed through QCTN cores (embedded model + data) and optional
+        ``data_fn``, exactly like single-process :class:`Trainer.fit`.
+
+        - **Static mode**: QCTN cores are fixed, train to match ``target``.
+        - **Dynamic data mode**: ``data_fn(step)`` updates data cores in-place
+          before each forward pass.
+
+        Uses ``EngineCommon`` for contraction and gradient computation (same as
+        single-process Trainer), with distributed gradient sync for world_size > 1.
+
+        Args:
+            target: Learning target (float, tensor, QCTN, or None).
+            loss: Loss specification — string name (``'mse'``, ``'nll'``, etc.),
+                callable ``fn(result, target, backend)``, or ``BaseLoss`` instance.
+            data_fn: Optional ``(step) -> None`` that updates data cores in the
+                QCTN before each step.
+
+        Returns:
+            List of loss values, one per completed step.
+        """
+        import time
+
+        from ..optim.distributed_sgdg import DistributedSGDG, LRScheduler
+        from ...core.engine_common import EngineCommon
+
+        max_steps = self.config.max_steps
+        log_interval = self.config.log_interval
+
+        # --- EngineCommon for contraction (data embedded in QCTN) ----------------
+        engine_common = EngineCommon(
+            backend=self.engine.backend,
+            strategy_mode=self.config.strategy_mode,
+        )
+
+        # --- Collect trainable params from QCTN ---------------------------------
+        params = self.qctn.parameters()
+
+        # --- Create optimizer ----------------------------------------------------
+        optimizer = DistributedSGDG(
+            params=params,
+            lr=self.config.learning_rate,
+            momentum=self.config.momentum,
+            stiefel=self.config.stiefel,
+        )
+
+        lr_scheduler = None
+        if self.config.lr_schedule:
+            lr_scheduler = LRScheduler(optimizer, self.config.lr_schedule)
+
+        # --- Training loop -------------------------------------------------------
+        loss_history: List[float] = []
+        start_time = time.time()
+
+        self._log(f"fit(): {max_steps} steps, lr={self.config.learning_rate}, "
+                  f"stiefel={self.config.stiefel}")
+
+        # Clear any stale strategy cache on the QCTN.
+        # init_distributed() may have compiled a strategy with non-batch shapes;
+        # data_fn will change the shapes, so we need a fresh compile.
+        for attr in list(vars(self.qctn)):
+            if attr.startswith('_compiled_strategy_'):
+                delattr(self.qctn, attr)
+
+        for step in range(1, max_steps + 1):
+            # 1. Optional per-step data update (updates QCTN cores in-place)
+            if data_fn is not None:
+                data_fn(step)
+
+            # 2. Forward + backward via EngineCommon (same as single-process)
+            loss_tensor, grads = engine_common.contract_for_gradient(
+                self.qctn, target=target, loss=loss,
+            )
+
+            # 3. Optimizer step
+            optimizer.step(list(grads))
+
+            # 4. LR schedule
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+
+            lv = float(loss_tensor)
+            loss_history.append(lv)
+
+            # 5. Logging
+            if log_interval and (step % log_interval == 0 or step == 1):
+                if self.comm.rank == 0:
+                    lr_str = f"  lr={optimizer.lr:.1e}" if lr_scheduler else ""
+                    print(f"  Step {step:4d}/{max_steps}  loss={lv:.6f}{lr_str}")
+
+            # 6. Early stop
+            if self.config.tol is not None and lv < self.config.tol:
+                self._log(f"Converged at step {step} (loss={lv:.6f})")
+                break
+
+        elapsed = time.time() - start_time
+        self._log(f"fit() completed: {len(loss_history)} steps, "
+                  f"final_loss={loss_history[-1]:.6f}, elapsed={elapsed:.1f}s")
+
+        if self.config.save_final_model:
+            self._save_final_model()
+
+        return loss_history
+
+    # --- Internal helpers for fit() -------------------------------------------
+
+    def _resolve_target(self, target):
+        """Resolve target for distributed training."""
+        if target is None:
+            return None
+        return target
+
     # ==================== Checkpointing ====================
     
     def _save_final_model(self):

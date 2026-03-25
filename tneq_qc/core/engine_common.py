@@ -110,17 +110,16 @@ class EngineCommon:
     # Strategy-based Compilation Methods
     # ============================================================================
 
-    def contract_with_compiled_strategy(self, qctn) -> Any:
+    def contract(self, qctn) -> Any:
         """Contract using compiled strategy (auto-selected based on mode).
 
-        Circuit states and measurement matrices must be embedded as cores
-        inside *qctn* before calling this method.
+        Data must be embedded as cores inside *qctn* before calling.
 
         Args:
-            qctn (QCTN): The quantum circuit tensor network to contract.
+            qctn: The quantum circuit tensor network to contract.
 
         Returns:
-            Backend tensor: Contraction result.
+            Contraction result.
         """
         cache_key = f'_compiled_strategy_{self.strategy_mode}'
 
@@ -139,37 +138,20 @@ class EngineCommon:
         cores_dict = {name: qctn.cores_weights[name] for name in qctn.cores}
         return compute_fn(cores_dict, None, None)
 
-    def contract_with_compiled_strategy_for_gradient(
+    def contract_for_gradient(
         self,
         qctn,
         target=None,
         loss: Union[None, str, Callable, BaseLoss] = None,
     ) -> Tuple:
-        """Contract using compiled strategy and compute gradients.
+        """Contract and compute gradients.
 
-        Circuit states and measurement matrices must be embedded as cores
-        inside *qctn* before calling this method.
+        Data must be embedded as cores inside *qctn* before calling.
 
         Args:
-            qctn   : The quantum circuit tensor network to contract.
-            target : Learning target.  Accepted types:
-
-                     * ``None``         — default ``1/side`` broadcast
-                       (backward-compatible with pre-2.6.3 behaviour)
-                     * ``float / int``  — broadcast scalar
-                     * ``list``         — converted to tensor
-                     * ``TNTensor``     — used directly (detached)
-                     * ``QCTN``         — contracted first (no grad),
-                       result used as target
-
-            loss   : Loss specification.  Accepted types:
-
-                     * ``None``         — ``'diagonal_mse'`` (default)
-                     * ``str``          — registered loss name
-                       (``'mse'``, ``'mae'``, ``'nll'``, ``'fidelity'``,
-                       ``'diagonal_mse'``)
-                     * ``callable``     — ``fn(result, target, backend)``
-                     * ``BaseLoss``     — instance used directly
+            qctn: The quantum circuit tensor network to contract.
+            target: Learning target (None, float, list, TNTensor, or QCTN).
+            loss: Loss specification (None, str, callable, or BaseLoss).
 
         Returns:
             tuple: ``(loss_value, gradients)``
@@ -249,6 +231,10 @@ class EngineCommon:
         value_and_grad_fn = self.backend.compute_value_and_grad(loss_fn, argnums=argnums)
         return value_and_grad_fn(*raw_core_tensors)
 
+    # Aliases (backward-compatible, to be removed in Phase 5)
+    contract_with_compiled_strategy = contract
+    contract_with_compiled_strategy_for_gradient = contract_for_gradient
+
     # ============================================================================
     # Probability Calculation
     # ============================================================================
@@ -271,7 +257,7 @@ class EngineCommon:
         for name, tensor in mx_dict.items():
             qctn[name] = tensor
 
-        result = self.contract_with_compiled_strategy(qctn)
+        result = self.contract(qctn)
 
         if isinstance(result, TNTensor):
             result.scale_to(1.0)
@@ -392,7 +378,7 @@ class EngineCommon:
                 qctn[other_name] = TNTensor(expanded, has_batch=True)
 
             # D: Contract.
-            result = self.contract_with_compiled_strategy(qctn)
+            result = self.contract(qctn)
 
             # E: Restore non-grid cores to their saved values.
             for other_name, saved in saved_cores.items():

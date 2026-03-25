@@ -163,7 +163,7 @@ class Trainer:
                 data_fn(step)
 
             # Forward + backward
-            loss_tensor, grads = self.engine.contract_with_compiled_strategy_for_gradient(
+            loss_tensor, grads = self.engine.contract_for_gradient(
                 self.qctn, target=target, loss=loss,
             )
 

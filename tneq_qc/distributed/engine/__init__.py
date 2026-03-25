@@ -1,20 +1,17 @@
-"""
-Distributed Engine module.
-
-Provides DistributedEngineSiamese with:
-- QCTN graph partitioning across workers
-- Hierarchical tensor contraction (log(n)+1 stages)
-- Tensor parallel matrix multiplication
-"""
+"""Distributed Engine module."""
 
 from .distributed_engine import (
-    DistributedEngineSiamese,
+    EngineDistributed,
     PartitionConfig,
     ContractStage,
     DistributedContractPlan,
 )
 
+# Backward compatibility alias
+DistributedEngineSiamese = EngineDistributed
+
 __all__ = [
+    'EngineDistributed',
     'DistributedEngineSiamese',
     'PartitionConfig',
     'ContractStage',

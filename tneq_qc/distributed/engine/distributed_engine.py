@@ -1,7 +1,6 @@
-"""
-Distributed Engine Siamese
+"""Distributed Engine
 
-Extends EngineSiamese with distributed computing capabilities:
+Extends EngineCommon with distributed computing capabilities:
 - QCTN graph partitioning across workers
 - Hierarchical tensor contraction (log(n)+1 stages)
 - Tensor parallel matrix multiplication
@@ -185,67 +184,48 @@ class DistributedContractPlan:
         return self.__str__()
 
 
-class DistributedEngineSiamese:
+class EngineDistributed:
+    """Distributed engine for tensor network contraction.
+
+    Provides distributed tensor contraction with hierarchical reduction:
+    1. Stage 0: Each worker contracts its local subgraph via EngineCommon
+    2. Stages 1-log2(n): Hierarchical tensor parallel reduction
+
+    Usage::
+
+        engine = EngineDistributed(backend='pytorch', comm=comm)
+        engine.init_distributed(combined)
+        result = engine.contract(combined)
     """
-    Distributed EngineSiamese.
-    
-    Provides distributed tensor network contraction with hierarchical reduction:
-    
-    1. **Initialization (init)**: 
-       - Master process partitions the QCTN graph into subgraphs
-       - Each subgraph is assigned to a worker
-       - Inter-node contraction graph is computed
-    
-    2. **Contraction (contract)**:
-       - Stage 0: Each worker contracts its local subgraph using StrategyCompiler
-       - Stage 1 to log2(n): Hierarchical reduction via tensor parallel
-         - Workers are grouped (e.g., [0,1], [2,3], then [0,1,2,3])
-         - Each group performs matrix multiplication using TP
-    
-    Example (4 workers):
-        - Stage 0: All workers contract their local subgraphs in parallel
-        - Stage 1: Groups [0,1] and [2,3] do TP matrix multiply
-        - Stage 2: Group [0,1,2,3] does final TP matrix multiply
-    
-    Usage:
-        >>> engine = DistributedEngineSiamese(backend='pytorch')
-        >>> engine.init_distributed(qctn)  # Partition and distribute
-        >>> result = engine.contract_distributed(circuit_states, measure_input)
-    """
-    
-    def __init__(self, 
-                 backend: Optional[Union[str, 'ComputeBackend']] = None, 
-                 strategy_mode: str = 'balanced', 
-                 mx_K: int = 100,
+
+    def __init__(self,
+                 backend: Optional[Union[str, 'ComputeBackend']] = None,
+                 strategy_mode: str = 'balanced',
                  comm: Optional[CommBase] = None,
                  partition_config: Optional[PartitionConfig] = None,
                  comm_timeout: float = 300.0,
                  enable_comm_retry: bool = True,
                  max_comm_retries: int = 3):
-        """
-        Initialize distributed engine.
-        
+        """Initialize distributed engine.
+
         Args:
-            backend: Compute backend ('pytorch', 'jax', or ComputeBackend instance)
-            strategy_mode: Contraction strategy mode ('fast', 'balanced', 'full')
-            mx_K: Maximum Hermite polynomial order
-            comm: Communication backend (auto-created if None)
-            partition_config: Configuration for graph partitioning
-            comm_timeout: Communication timeout in seconds (default: 300s)
-            enable_comm_retry: Enable automatic retry on communication failures
-            max_comm_retries: Maximum number of retries for failed communications
+            backend: Compute backend ('pytorch', 'jax', or instance).
+            strategy_mode: Contraction strategy mode.
+            comm: Communication backend (auto-created if None).
+            partition_config: Graph partitioning configuration.
+            comm_timeout: Communication timeout in seconds.
+            enable_comm_retry: Enable automatic retry on comm failures.
+            max_comm_retries: Maximum retries for failed communications.
         """
-        # Import and create base engine
-        from ...core.engine_siamese import EngineSiamese
-        
-        self._base_engine = EngineSiamese(
+        from ...core.engine_common import EngineCommon
+
+        self._engine_common = EngineCommon(
             backend=backend,
             strategy_mode=strategy_mode,
-            mx_K=mx_K
         )
         
         # Initialize communication
-        self.comm = comm or get_comm_backend(backend.backend_info.backend_type)
+        self.comm = comm or get_comm_backend(self._engine_common.backend.backend_info.backend_type)
 
         self.rank = self.comm.rank
         self.world_size = self.comm.world_size
@@ -266,7 +246,7 @@ class DistributedEngineSiamese:
         self._local_qctn: Optional['QCTN'] = None  # Local partition QCTN
         self._contract_plan: Optional[DistributedContractPlan] = None
         
-        self._log(f"DistributedEngineSiamese initialized: rank={self.rank}/{self.world_size}, "
+        self._log(f"EngineDistributed initialized: rank={self.rank}/{self.world_size}, "
                   f"timeout={comm_timeout}s, retry={enable_comm_retry}")
         
 
@@ -331,38 +311,23 @@ class DistributedEngineSiamese:
             print(f"[Rank {self.rank}] ERROR: Comm health check failed: {e}")
             return False
     
-    # ==================== Proxy to Base Engine ====================
-    
+    # ==================== Proxy to EngineCommon ====================
+
     @property
     def backend(self):
         """Access the underlying compute backend."""
-        return self._base_engine.backend
-    
+        return self._engine_common.backend
+
     @property
     def contractor(self):
         """Access the einsum strategy contractor."""
-        return self._base_engine.contractor
-    
+        return self._engine_common.contractor
+
     @property
     def strategy_compiler(self):
         """Access the strategy compiler."""
-        return self._base_engine.strategy_compiler
-    
-    def generate_data(self, x, K=None, ret_type='tensor'):
-        """
-        Generate measurement matrices from input data.
-        
-        Proxies to base engine's generate_data method.
-        
-        Args:
-            x: Input tensor of shape (B, D)
-            K: Hermite polynomial order (uses engine default if None)
-            
-        Returns:
-            (Mx_list, extra_info)
-        """
-        return self._base_engine.generate_data(x, K=K, ret_type=ret_type)
-    
+        return self._engine_common.strategy_compiler
+
     # ==================== Distributed Initialization ====================
     
     def init_distributed(self, qctn: 'QCTN', partitions=None) -> DistributedContractPlan:
@@ -873,126 +838,46 @@ class DistributedEngineSiamese:
     
     # ==================== Distributed Contraction ====================
     
-    def contract_distributed(self,
-                             circuit_states_list: List,
-                             measure_input_list: List,
-                             measure_is_matrix: bool = True) -> 'torch.Tensor':
-        """
-        Execute distributed tensor contraction.
-        
-        Follows the hierarchical contraction plan:
-        1. Stage 0: Local contraction using StrategyCompiler
-        2. Stages 1-log2(n): Hierarchical tensor parallel reduction
-        
-        Args:
-            circuit_states_list: Circuit states for each qubit
-            measure_input_list: Measurement matrices (Mx) for each qubit
-            measure_is_matrix: Whether measure_input is matrix form
-            
+    def contract_distributed(self) -> 'torch.Tensor':
+        """Execute distributed tensor contraction.
+
+        Data must be embedded in QCTN cores before calling.
+
         Returns:
-            Final contracted result tensor
+            Final contracted result tensor.
         """
         if not self._is_initialized:
             raise RuntimeError("Must call init_distributed() before contract_distributed()")
-        
+
         import torch
-        
+
         plan = self._contract_plan
-        
-        # Stage 0: Local contraction
-        # Extract local circuit_states and measure_input based on QCTN's adjacency table
-        
-        # Get INPUT qubit indices (in_edge_list where neighbor_name is empty)
-        input_qubit_indices = set()
-        for entry in self._local_qctn.adjacency_table:
-            for e in entry.get('in_edge_list', []):
-                if not e.get('neighbor_name'):  # INPUT edge
-                    qubit_idx = e.get('qubit_idx', -1)
-                    if qubit_idx >= 0:
-                        input_qubit_indices.add(qubit_idx)
-        
-        # Get OUTPUT qubit indices (out_edge_list where neighbor_name is empty)
-        output_qubit_indices = set()
-        for entry in self._local_qctn.adjacency_table:
-            for e in entry.get('out_edge_list', []):
-                if not e.get('neighbor_name'):  # OUTPUT edge
-                    qubit_idx = e.get('qubit_idx', -1)
-                    if qubit_idx >= 0:
-                        output_qubit_indices.add(qubit_idx)
-        
-        # Sort indices to maintain order
-        input_qubit_indices = sorted(input_qubit_indices)
-        output_qubit_indices = sorted(output_qubit_indices)
-        
-        # Extract local circuit_states_list based on INPUT qubits
-        local_circuit_states_list = {i: circuit_states_list[i] for i in input_qubit_indices}
-        
-        # Extract local measure_input_list based on OUTPUT qubits
-        local_measure_input_list = {i: measure_input_list[i] for i in output_qubit_indices}
-        
-        # print(f"[Rank {self.rank}] Local contraction: "
-        #       f"input_qubits={input_qubit_indices}, output_qubits={output_qubit_indices}")
 
         import time
-
-        # if self.rank == 0:
-        #     exit()
-
         tic = time.time()
 
-        local_result = self._contract_local(local_circuit_states_list, local_measure_input_list, 
-                                            measure_is_matrix, ret_type='TNTensor')
-        
-        toc = time.time()
+        local_result = self._contract_local()
 
-        # print(f"local_result {isinstance(local_result, TNTensor)}")
+        toc = time.time()
 
         if self.world_size == 1:
             local_print(f"[Rank {self.rank}] Single rank execution complete. Result shape: {local_result.shape}")
             return local_result
-        
+
         print(f"[Rank {self.rank}] Local contraction complete. Result shape: {local_result.shape} cost time {toc - tic}")
 
-        # Reduction stages
         current_result = local_result
-        
+
         for stage_idx in range(1, plan.num_stages):
             current_result = self._contract_reduce_stage(
                 stage_idx, current_result
             )
-        
+
         return current_result
     
-    def _contract_local(self,
-                        circuit_states_list: List,
-                        measure_input_list: List,
-                        measure_is_matrix: bool = True,
-                        ret_type: str = 'tensor') -> 'torch.Tensor':
-        """
-        Execute local contraction (Stage 0).
-        
-        Uses the base engine's strategy compiler for optimal contraction.
-        
-        Args:
-            circuit_states_list: Circuit states
-            measure_input_list: Measurement matrices
-            measure_is_matrix: Whether measure_input is matrix form
-            
-        Returns:
-            Local contraction result
-        """
-        qctn = self._local_qctn
-        
-        # Use base engine's compiled strategy
-        result = self._base_engine.contract_with_compiled_strategy(
-            qctn,
-            circuit_states_list=circuit_states_list,
-            measure_input_list=measure_input_list,
-            measure_is_matrix=measure_is_matrix,
-            ret_type=ret_type
-        )
-        
-        return result
+    def _contract_local(self) -> 'torch.Tensor':
+        """Execute local contraction (Stage 0) via EngineCommon."""
+        return self._engine_common.contract(self._local_qctn)
     
     def _contract_reduce_stage(self, stage_idx: int, 
                                 local_result: 'torch.Tensor') -> 'torch.Tensor':
@@ -1765,36 +1650,44 @@ class DistributedEngineSiamese:
             print(f"[Rank {self.rank}] ERROR: Tensor exchange with rank {partner_rank} failed: {e}")
             raise
     
-    # ==================== Backward Compatibility ====================
-    
-    def contract_with_compiled_strategy(self, qctn, circuit_states_list, 
-                                         measure_input_list=None, **kwargs):
+    # ==================== Unified Engine Interface ====================
+
+    def contract(self, qctn) -> Any:
+        """Forward pass via distributed contraction.
+
+        Data must be embedded in QCTN cores before calling.
+        Delegates to contract_distributed() if initialized,
+        otherwise falls back to EngineCommon.contract().
         """
-        Standard tensor contraction (non-distributed).
-        
-        Proxies to base engine.
+        if self._is_initialized and self.world_size > 1:
+            return self.contract_distributed()
+        return self._engine_common.contract(qctn)
+
+    def contract_for_gradient(self, qctn, target=None, loss=None):
+        """Forward + loss + backward via EngineCommon.
+
+        For distributed training, uses EngineCommon on the full QCTN
+        (same as single-process). Gradient-aware allreduce is handled
+        separately if needed.
+
+        Args:
+            qctn: QCTN with data embedded.
+            target: Learning target.
+            loss: Loss specification.
+
+        Returns:
+            tuple: (loss_value, gradients)
         """
-        return self._base_engine.contract_with_compiled_strategy(
-            qctn, 
-            circuit_states_list=circuit_states_list,
-            measure_input_list=measure_input_list,
-            **kwargs
-        )
-    
-    def contract_with_compiled_strategy_for_gradient(self, qctn, circuit_states_list=None, 
-                                                      measure_input_list=None, **kwargs):
+        return self._engine_common.contract_for_gradient(qctn, target=target, loss=loss)
+
+    def sync_data(self, qctn):
+        """Sync data cores after data_fn updates (no-op for now).
+
+        Called by Trainer after data_fn. In future, could re-distribute
+        updated cores to local partitions.
         """
-        Tensor contraction with gradient computation.
-        
-        Proxies to base engine.
-        """
-        return self._base_engine.contract_with_compiled_strategy_for_gradient(
-            qctn,
-            circuit_states_list=circuit_states_list,
-            measure_input_list=measure_input_list,
-            **kwargs
-        )
-    
+        pass
+
     # ==================== Gradient-Aware Operations ====================
     
     def _get_process_group(self, rank_list: List[int]):
@@ -1863,31 +1756,20 @@ class DistributedEngineSiamese:
 
         return allreduce_with_grad(tensor, TorchReduceOp.SUM, group=pg)
     
-    def contract_distributed_with_gradient(self,
-                                            circuit_states_list: List,
-                                            measure_input_list: List,
-                                            measure_is_matrix: bool = True,
-                                            target: 'torch.Tensor' = None):
-        """
-        Execute distributed contraction and compute gradients.
-        
-        Uses PyTorch autograd to compute gradients through the entire
-        distributed contraction pipeline, including allreduce operations.
-        
+    def contract_distributed_with_gradient(self, target=None, loss=None):
+        """Execute distributed contraction and compute gradients.
+
         Args:
-            circuit_states_list: Circuit states for each qubit
-            measure_input_list: Measurement matrices (Mx) for each qubit
-            measure_is_matrix: Whether measure_input is matrix form
-            target: Target tensor for loss computation (default: all ones)
-            
+            target: Target tensor for loss computation.
+            loss: Loss specification (str, callable, or BaseLoss).
+
         Returns:
-            tuple: (loss, grads)
-                - loss: Scalar loss value (detached)
-                - grads: List of gradient tensors for local partition weights
+            tuple: (loss_value, grads)
         """
         import torch
-        from ...core.tn_tensor import TNTensor
-        
+        from ...losses import LossRegistry
+        from ...losses.target import TargetResolver
+
         # Ensure local weights require gradients
         for name in self._local_qctn.cores:
             weight = self._local_qctn.cores_weights[name]
@@ -1899,161 +1781,62 @@ class DistributedEngineSiamese:
                 weight.requires_grad_(True)
                 if weight.grad is not None:
                     weight.grad.zero_()
-        
-        # Forward pass: distributed contraction
-        result = self.contract_distributed(
-            circuit_states_list=circuit_states_list,
-            measure_input_list=measure_input_list,
-            measure_is_matrix=measure_is_matrix
+
+        result = self.contract_distributed()
+
+        local_print(f"[Rank {self.rank}] Contraction result shape: {result.shape}")
+
+        # Resolve loss
+        loss_obj = LossRegistry.resolve(loss)
+        resolved_target = TargetResolver.resolve(
+            target, result.shape, self.backend, engine=self._engine_common
         )
+        loss_val = loss_obj(result, resolved_target, self.backend)
 
-        local_print(f"[Rank {self.rank}] Contraction result shape: {result.shape} result: {result}")
-        
-        # Debug: Check if result is connected to computation graph
-        local_print(f"[Rank {self.rank}] result.requires_grad: {result.tensor.requires_grad}")
-        local_print(f"[Rank {self.rank}] result.grad_fn: {result.tensor.grad_fn}")
-        
-        # Compute cross-entropy loss
-        loss = self._compute_cross_entropy_loss(result, target)
-        
-        # Debug: Check loss connection
-        local_print(f"[Rank {self.rank}] loss.requires_grad: {loss.requires_grad}")
-        local_print(f"[Rank {self.rank}] loss.grad_fn: {loss.grad_fn}")
+        local_print(f"[Rank {self.rank}] loss.requires_grad: {loss_val.requires_grad}")
 
+        # Collect raw tensors for autograd
         raw_core_tensors = []
         core_names = []
         for name in self._local_qctn.cores:
             weight = self._local_qctn.cores_weights[name]
-            if isinstance(weight, TNTensor):
-                raw_core_tensors.append(weight.tensor)
-            else:
-                raw_core_tensors.append(weight)
+            raw = weight.tensor if isinstance(weight, TNTensor) else weight
+            raw_core_tensors.append(raw)
             core_names.append(name)
-        
-        grad_tensors = [x for x in raw_core_tensors]
 
-        # Debug: print requires_grad status and grad_fn
-        for i, (name, tensor) in enumerate(zip(core_names, grad_tensors)):
-            local_print(f"[Rank {self.rank}] Input tensor {name}: requires_grad={tensor.requires_grad}, "
-                  f"is_leaf={tensor.is_leaf}, grad_fn={tensor.grad_fn}, shape={tensor.shape}")
-
-        gradients = self.backend.torch.autograd.grad(
-            outputs=loss,
-            inputs=grad_tensors,
+        gradients = torch.autograd.grad(
+            outputs=loss_val,
+            inputs=raw_core_tensors,
             create_graph=False,
             retain_graph=False,
             allow_unused=False
         )
-        
-        # Debug: check which gradients are None (unused)
-        for i, (name, grad) in enumerate(zip(core_names, gradients)):
-            if grad is None:
-                local_print(f"[Rank {self.rank}] WARNING: Gradient for {name} is None (tensor not used in graph)")
-            else:
-                local_print(f"[Rank {self.rank}] Gradient for {name}: shape={grad.shape}, norm={grad.norm().item():.6f}")
-        
-        # Replace None gradients with zeros to avoid errors downstream
+
         grads = []
         for i, grad in enumerate(gradients):
             if grad is None:
-                grads.append(torch.zeros_like(grad_tensors[i]))
+                grads.append(torch.zeros_like(raw_core_tensors[i]))
             else:
                 grads.append(grad.contiguous())
 
-        # Collect gradients from local partition weights
-        # grads = []
-        # for name in self._local_qctn.cores:
-        #     weight = self._local_qctn.cores_weights[name]
-        #     if isinstance(weight, TNTensor):
-        #         tensor = weight.tensor
-        #     else:
-        #         tensor = weight
-            
-        #     if hasattr(tensor, 'grad') and tensor.grad is not None:
-        #         grads.append(tensor.grad.clone())
-        #     else:
-        #         grads.append(torch.zeros_like(tensor))
-        
-        # return loss.detach(), grads
-
-        # print(f"[Rank {self.rank}] core_weights names: {[(name, qctn.cores_weights[name].tensor.mean() if isinstance(qctn.cores_weights[name], TNTensor) else qctn.cores_weights[name].mean()) for name in core_names]}")
-        # print(f"[Rank {self.rank}] Loss: {loss.item()}, Collected {[grad.mean().item() for grad in grads]} gradients.")
-        # print(f"[Rank {self.rank}] measure_input_list mean: {[m.mean().item() for m in measure_input_list]}")
-        
-
-        return loss, grads
+        return loss_val, grads
     
-    def _compute_cross_entropy_loss(self, result: 'torch.Tensor', 
-                                     target: 'torch.Tensor' = None) -> 'torch.Tensor':
-        """
-        Compute cross-entropy loss from contraction result.
-        
-        Args:
-            result: Contraction result tensor (shape: [batch])
-            target: Target tensor (default: all ones for probability maximization)
-            
-        Returns:
-            Scalar loss tensor
-        """
-        import torch
-        
-        if isinstance(result, TNTensor):
-            res_tensor = result.tensor
-            res_log_scale = result.log_scale
-        else:
-            res_tensor = result
-            res_log_scale = 0.0
+    def train_step(self, optimizer, target=None, loss=None) -> float:
+        """Execute a single training step.
 
-        if target is None:
-            # Default: maximize all probabilities
-            target = torch.ones_like(res_tensor)
-        
-        # Avoid log(0)
-        result_clamped = torch.clamp(res_tensor, min=1e-10)
-        
-        # Cross-entropy: -mean(target * log(result))
-        # Total log(value) = log(tensor) + log_scale
-        log_result = torch.log(result_clamped) + res_log_scale
-        loss = -torch.mean(target * log_result)
-        
-        return loss
-    
-    def train_step(self,
-                   circuit_states_list: List,
-                   measure_input_list: List,
-                   optimizer,
-                   measure_is_matrix: bool = True,
-                   target: 'torch.Tensor' = None) -> float:
-        """
-        Execute a single training step.
-        
-        Combines forward pass, loss computation, backward pass, and optimizer step.
-        
         Args:
-            circuit_states_list: Circuit states for each qubit
-            measure_input_list: Measurement matrices (Mx) for each qubit
-            optimizer: DistributedSGDG optimizer
-            measure_is_matrix: Whether measure_input is matrix form
-            target: Target tensor for loss computation
-            
+            optimizer: Optimizer with step(grads) interface.
+            target: Target for loss computation.
+            loss: Loss specification.
+
         Returns:
-            Loss value as float
+            Loss value as float.
         """
-        # Zero gradients
-        # optimizer.zero_grad(self._local_qctn)
-        
-        # Forward + backward
-        loss, grads = self.contract_distributed_with_gradient(
-            circuit_states_list=circuit_states_list,
-            measure_input_list=measure_input_list,
-            measure_is_matrix=measure_is_matrix,
-            target=target
+        loss_val, grads = self.contract_distributed_with_gradient(
+            target=target, loss=loss
         )
-        
-        # Optimizer step
-        optimizer.step(self._local_qctn, grads)
-        
-        return loss.item() if hasattr(loss, 'item') else float(loss)
+        optimizer.step(grads)
+        return loss_val.item() if hasattr(loss_val, 'item') else float(loss_val)
     
     # Backward compatibility aliases
     @property
@@ -2085,8 +1868,7 @@ class DistributedEngineSiamese:
         """
         import torch
         import torch.distributed as dist
-        from ...core.tn_tensor import TNTensor
-        
+
         if not self._is_initialized:
             raise RuntimeError("Must call init_distributed() before save_cores_distributed()")
         
@@ -2100,7 +1882,6 @@ class DistributedEngineSiamese:
             if name in self._local_qctn.cores_weights:
                 weight = self._local_qctn.cores_weights[name]
                 if isinstance(weight, TNTensor):
-                    # Apply scale to get final value
                     tensor = (weight.tensor * weight.scale).detach().cpu()
                 else:
                     tensor = weight.detach().cpu()

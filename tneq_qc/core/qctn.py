@@ -395,6 +395,63 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             result.append((readable, c))
         return result
 
+    def requires_grad_(self, requires_grad=True):
+        """Set requires_grad on all core tensors.
+
+        Args:
+            requires_grad: Whether to enable gradient tracking.
+
+        Returns:
+            self (for chaining).
+        """
+        for t in self.cores_weights.values():
+            t.requires_grad_(requires_grad)
+        return self
+
+    def bra(self):
+        """Return bra (conjugate) version of this QCTN.
+
+        Creates a new QCTN with the bra graph topology (input-only edges)
+        where each core is the complex conjugate of the original.
+
+        Returns:
+            QCTN: New QCTN suitable for closing the right boundary.
+        """
+        nqubits = self.nqubits
+        phys_dims = []
+        for entry in self.adjacency_table:
+            out_edges = entry.get('out_edge_list', [])
+            if out_edges:
+                phys_dims.append(out_edges[0]['edge_rank'])
+            else:
+                in_edges = entry.get('in_edge_list', [])
+                if in_edges:
+                    phys_dims.append(in_edges[0]['edge_rank'])
+                else:
+                    phys_dims.append(2)
+
+        if len(set(phys_dims)) == 1:
+            phys_dim = phys_dims[0]
+        else:
+            phys_dim = phys_dims[0]
+
+        from ..utils.graph_generators import QCTNHelper
+        bra_graph = QCTNHelper.circuit_bra(nqubits, phys_dim=phys_dim)
+        bra_qctn = QCTN(bra_graph, backend=self.backend)
+
+        for c_name in self.cores:
+            t = self.cores_weights.get(c_name)
+            if t is None:
+                continue
+            if c_name in bra_qctn.cores_weights:
+                if isinstance(t, TNTensor):
+                    bra_qctn.cores_weights[c_name] = TNTensor(
+                        t.tensor.conj(), scale=t.scale)
+                else:
+                    bra_qctn.cores_weights[c_name] = t.conj()
+
+        return bra_qctn
+
     # ================================================================
     # nn.Module-style interface
     # ================================================================

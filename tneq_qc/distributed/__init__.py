@@ -57,7 +57,7 @@ from .parallel import (
 )
 
 # Distributed engine
-from .engine import DistributedEngineSiamese
+from .engine import EngineDistributed, DistributedEngineSiamese
 from .engine.distributed_engine import (
     PartitionConfig,
     ContractStage,
@@ -117,6 +117,7 @@ __all__ = [
     'create_model_parallel_trainer',
     
     # Engine
+    'EngineDistributed',
     'DistributedEngineSiamese',
     'PartitionConfig',
     'ContractStage',

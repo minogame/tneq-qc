@@ -104,7 +104,7 @@ class TargetResolver:
                     "engine must be provided when target is a QCTN. "
                     "Pass the EngineCommon instance via engine=."
                 )
-            contracted = engine.contract_with_compiled_strategy(target)
+            contracted = engine.contract(target)
             return backend.detach(contracted)
 
         # ------------------------------------------------------------------
