@@ -17,8 +17,7 @@ import numpy as np
 
 from tneq_qc import (
     QCTN, TNTensor, EngineCommon, BackendFactory, Quadratic,
-    DataGenerator, make_data_fn,
-    SGDG, Trainer, TrainConfig,
+    DataGenerator, make_data_fn, SGDG,
 )
 
 N_QUBITS   = 4
@@ -68,16 +67,19 @@ def main():
     if isinstance(result, TNTensor):
         print(f"Forward check: shape={tuple(result.shape)} eff={result.tensor * result.scale}")
 
-    # Training
+    # Train
     optimizer = SGDG(combined.parameters(), backend, lr=LR)
     data_fn = make_data_fn(data_gen, combined, batch_size=BATCH_SIZE, K=PHYS_DIM)
+    loss_history = []
 
-    save_path = f"checkpoints/quadratic_{N_QUBITS}q_K{PHYS_DIM}_B{BOND_DIM}.safetensors"
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    trainer = Trainer(engine, combined, optimizer,
-        TrainConfig(max_steps=N_STEPS, log_every=LOG_EVERY, save_path=save_path))
-    loss_history = trainer.fit(target=1, loss='nll', data_fn=data_fn)
+    for step in range(1, N_STEPS + 1):
+        data_fn(step)
+        loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
+        optimizer.step(list(grads))
+        lv = float(loss_val)
+        loss_history.append(lv)
+        if step % LOG_EVERY == 0 or step == 1:
+            print(f"  Step {step:4d}/{N_STEPS}  loss={lv:.6f}")
 
     print(f"\nDone. Initial={loss_history[0]:.6f}  Final={loss_history[-1]:.6f}  "
           f"Reduced={loss_history[0] - loss_history[-1]:.6f}")

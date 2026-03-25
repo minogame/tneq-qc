@@ -1,10 +1,4 @@
-"""Distributed Engine
-
-Extends EngineCommon with distributed computing capabilities:
-- QCTN graph partitioning across workers
-- Hierarchical tensor contraction (log(n)+1 stages)
-- Tensor parallel matrix multiplication
-"""
+"""Distributed Engine — inherits EngineCommon."""
 
 from __future__ import annotations
 import math
@@ -14,6 +8,7 @@ from typing import List, Dict, Tuple, Optional, Any, Union, TYPE_CHECKING
 import numpy as np
 
 from ..comm import CommBase, get_comm_backend, ReduceOp
+from ...core.engine_common import EngineCommon
 
 if TYPE_CHECKING:
     import torch
@@ -22,11 +17,9 @@ if TYPE_CHECKING:
 
 from ...core.tn_tensor import TNTensor
 
-# debug
 local_debug = False
 
 def local_print(*args, **kwargs):
-    """Print function that only prints when local_debug is True."""
     if local_debug:
         print(*args, **kwargs)
 
@@ -184,12 +177,8 @@ class DistributedContractPlan:
         return self.__str__()
 
 
-class EngineDistributed:
-    """Distributed engine for tensor network contraction.
-
-    Provides distributed tensor contraction with hierarchical reduction:
-    1. Stage 0: Each worker contracts its local subgraph via EngineCommon
-    2. Stages 1-log2(n): Hierarchical tensor parallel reduction
+class EngineDistributed(EngineCommon):
+    """Distributed engine — inherits EngineCommon, adds partitioning and reduce.
 
     Usage::
 
@@ -199,70 +188,37 @@ class EngineDistributed:
     """
 
     def __init__(self,
-                 backend: Optional[Union[str, 'ComputeBackend']] = None,
+                 backend=None,
                  strategy_mode: str = 'balanced',
                  comm: Optional[CommBase] = None,
                  partition_config: Optional[PartitionConfig] = None,
-                 comm_timeout: float = 300.0,
-                 enable_comm_retry: bool = True,
-                 max_comm_retries: int = 3):
-        """Initialize distributed engine.
+                 comm_timeout: float = 300.0):
+        super().__init__(backend=backend, strategy_mode=strategy_mode)
 
-        Args:
-            backend: Compute backend ('pytorch', 'jax', or instance).
-            strategy_mode: Contraction strategy mode.
-            comm: Communication backend (auto-created if None).
-            partition_config: Graph partitioning configuration.
-            comm_timeout: Communication timeout in seconds.
-            enable_comm_retry: Enable automatic retry on comm failures.
-            max_comm_retries: Maximum retries for failed communications.
-        """
-        from ...core.engine_common import EngineCommon
-
-        self._engine_common = EngineCommon(
-            backend=backend,
-            strategy_mode=strategy_mode,
-        )
-        
-        # Initialize communication
-        self.comm = comm or get_comm_backend(self._engine_common.backend.backend_info.backend_type)
+        self.comm = comm or get_comm_backend(self.backend.backend_info.backend_type)
 
         self.rank = self.comm.rank
         self.world_size = self.comm.world_size
-        
-        # Communication settings
         self.comm_timeout = comm_timeout
-        self.enable_comm_retry = enable_comm_retry
-        self.max_comm_retries = max_comm_retries
-        
-        # Partition configuration
+
         self.partition_config = partition_config or PartitionConfig(
             num_partitions=self.world_size
         )
-        
-        # Distributed state (set after init_distributed)
+
         self._is_initialized = False
         self._qctn: Optional['QCTN'] = None
-        self._local_qctn: Optional['QCTN'] = None  # Local partition QCTN
+        self._local_qctn: Optional['QCTN'] = None
         self._contract_plan: Optional[DistributedContractPlan] = None
-        
-        self._log(f"EngineDistributed initialized: rank={self.rank}/{self.world_size}, "
-                  f"timeout={comm_timeout}s, retry={enable_comm_retry}")
-        
 
         self.num_stages = math.ceil(math.log2(self.world_size)) + 1 if self.world_size > 1 else 1
 
         import torch.distributed as dist
-
         self._pg_cache = {}
         for stage_idx in range(self.num_stages):
             for j in range(0, self.world_size, 2**stage_idx):
                 group = list(range(j, min(j + 2**stage_idx, self.world_size)))
-
                 dist_group = dist.new_group(group)
-
-                self._pg_cache[tuple(group)] = dist_group
-                
+                self._pg_cache[tuple(group)] = dist_group        
         
     
     def _log(self, msg: str, level: str = "info"):
@@ -271,84 +227,29 @@ class EngineDistributed:
             local_print(f"[DistributedEngine] {msg}")
     
     def check_comm_health(self, timeout: float = 5.0) -> bool:
-        """
-        Check communication health by performing a simple allreduce operation.
-        
-        Args:
-            timeout: Timeout in seconds for the health check
-            
-        Returns:
-            True if communication is healthy, False otherwise
-        """
+        """Check communication health via allreduce."""
         import torch
         import time
-        
         try:
-            # Create a simple test tensor
-            test_tensor = torch.tensor([self.rank], dtype=torch.float32, 
+            test_tensor = torch.tensor([self.rank], dtype=torch.float32,
                                       device=self.backend.backend_info.device)
-            
             start_time = time.time()
-            
-            # Perform allreduce as health check
             result_list = self.comm.allgather(test_tensor)
-            
             elapsed = time.time() - start_time
-            
-            # Verify result
             expected_sum = sum(range(self.world_size))
             actual_sum = sum([t.item() for t in result_list])
-            
             if abs(actual_sum - expected_sum) < 1e-6:
                 local_print(f"[Rank {self.rank}] Comm health check passed ({elapsed:.3f}s)")
                 return True
-            else:
-                print(f"[Rank {self.rank}] WARNING: Comm health check failed - "
-                      f"expected sum {expected_sum}, got {actual_sum}")
-                return False
-                
+            return False
         except Exception as e:
             print(f"[Rank {self.rank}] ERROR: Comm health check failed: {e}")
             return False
-    
-    # ==================== Proxy to EngineCommon ====================
 
-    @property
-    def backend(self):
-        """Access the underlying compute backend."""
-        return self._engine_common.backend
-
-    @property
-    def contractor(self):
-        """Access the einsum strategy contractor."""
-        return self._engine_common.contractor
-
-    @property
-    def strategy_compiler(self):
-        """Access the strategy compiler."""
-        return self._engine_common.strategy_compiler
-
-    # ==================== Distributed Initialization ====================
-    
     def init_distributed(self, qctn: 'QCTN', partitions=None) -> DistributedContractPlan:
-        """
-        Initialize distributed contraction for a QCTN.
-        
-        This method:
-        1. Master process partitions the QCTN graph into subgraphs
-        2. Distributes subgraph assignments to all workers
-        3. Computes the inter-node contraction plan
-        
-        Args:
-            qctn: The full QCTN to distribute
-            
-        Returns:
-            DistributedContractPlan: Execution plan for this worker
-        """
+        """Partition QCTN graph and build contraction plan."""
         self._qctn = qctn
-        
-        # Step 1: All processes compute the same partition (deterministic)
-        # No broadcast needed - each process runs the same partitioning logic
+
         partitions = self._partition_qctn(qctn, partitions=partitions)
         contract_plan = self._compute_contract_plan(qctn, partitions)
         
@@ -877,7 +778,7 @@ class EngineDistributed:
     
     def _contract_local(self) -> 'torch.Tensor':
         """Execute local contraction (Stage 0) via EngineCommon."""
-        return self._engine_common.contract(self._local_qctn)
+        return super().contract(self._local_qctn)
     
     def _contract_reduce_stage(self, stage_idx: int, 
                                 local_result: 'torch.Tensor') -> 'torch.Tensor':
@@ -1653,40 +1554,14 @@ class EngineDistributed:
     # ==================== Unified Engine Interface ====================
 
     def contract(self, qctn) -> Any:
-        """Forward pass via distributed contraction.
-
-        Data must be embedded in QCTN cores before calling.
-        Delegates to contract_distributed() if initialized,
-        otherwise falls back to EngineCommon.contract().
-        """
+        """Override: distributed contraction if initialized, else local."""
         if self._is_initialized and self.world_size > 1:
             return self.contract_distributed()
-        return self._engine_common.contract(qctn)
+        return super().contract(qctn)
 
     def contract_for_gradient(self, qctn, target=None, loss=None):
-        """Forward + loss + backward via EngineCommon.
-
-        For distributed training, uses EngineCommon on the full QCTN
-        (same as single-process). Gradient-aware allreduce is handled
-        separately if needed.
-
-        Args:
-            qctn: QCTN with data embedded.
-            target: Learning target.
-            loss: Loss specification.
-
-        Returns:
-            tuple: (loss_value, gradients)
-        """
-        return self._engine_common.contract_for_gradient(qctn, target=target, loss=loss)
-
-    def sync_data(self, qctn):
-        """Sync data cores after data_fn updates (no-op for now).
-
-        Called by Trainer after data_fn. In future, could re-distribute
-        updated cores to local partitions.
-        """
-        pass
+        """Override: uses super() for gradient computation."""
+        return super().contract_for_gradient(qctn, target=target, loss=loss)
 
     # ==================== Gradient-Aware Operations ====================
     
@@ -1789,7 +1664,7 @@ class EngineDistributed:
         # Resolve loss
         loss_obj = LossRegistry.resolve(loss)
         resolved_target = TargetResolver.resolve(
-            target, result.shape, self.backend, engine=self._engine_common
+            target, result.shape, self.backend, engine=self
         )
         loss_val = loss_obj(result, resolved_target, self.backend)
 

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import numpy as np
 
-from tneq_qc import QCTN, EngineCommon, BackendFactory, SGDG, Trainer, TrainConfig
+from tneq_qc import QCTN, EngineCommon, BackendFactory, SGDG
 from tneq_qc.core.tn_tensor import TNTensor
 
 N_QUBITS = 4
@@ -61,12 +61,15 @@ def main():
 
     # Train
     optimizer = SGDG(combined.parameters(), backend, lr=LR)
-    save_path = f"checkpoints/tneq_{N_QUBITS}q_P{PHYS_DIM}.safetensors"
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    loss_history = []
 
-    trainer = Trainer(engine, combined, optimizer,
-        TrainConfig(max_steps=N_STEPS, log_every=LOG_EVERY, save_path=save_path))
-    loss_history = trainer.fit(target=1.0, loss='mse')
+    for step in range(1, N_STEPS + 1):
+        loss_val, grads = engine.contract_for_gradient(combined, target=1.0, loss='mse')
+        optimizer.step(list(grads))
+        lv = float(loss_val)
+        loss_history.append(lv)
+        if step % LOG_EVERY == 0 or step == 1:
+            print(f"  Step {step:4d}/{N_STEPS}  loss={lv:.6f}")
 
     final_trace = get_val(engine.contract(combined))
     print(f"\nDone. Initial={loss_history[0]:.6f}  Final={loss_history[-1]:.6f}  "
