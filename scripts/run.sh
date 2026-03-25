@@ -54,7 +54,7 @@ torchrun \
     --node_rank=$RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    examples/example_distributed_training.py
+    examples/train_dist.py
 
 echo ""
 echo "Done!"

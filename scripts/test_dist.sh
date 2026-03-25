@@ -1,14 +1,6 @@
 
 echo "pjsub_node_list: " $(pjsub_node_list)
 echo "PJM_NODE_RANK: " $PJM_NODE_RANK
-echo "PJM_O_NODEINF: " $PJM_O_NODEINF
-echo "PJM_NODE_ITR: " $PJM_NODE_ITR
-echo "OMPI_COMM_WORLD_RANK: " $OMPI_COMM_WORLD_RANK
-echo "OMPI_COMM_WORLD_SIZE: " $OMPI_COMM_WORLD_SIZE
-echo "PMIX_RANK: " $PMIX_RANK
-echo "PMIX_SIZE: " $PMIX_SIZE
-echo "MASTER_ADDR: " $MASTER_ADDR
-echo "MASTER_PORT: " $MASTER_PORT
 
 MASTER_ADDR=$(hostname)
 if [ "$PJM_NODE_RANK" -ne 0 ]; then
@@ -39,20 +31,15 @@ export NCCL_SOCKET_IFNAME=eno1
 export TP_SOCKET_IFNAME=eno1
 
 
-# export RANK=$PJM_NODE_RANK
-export RANK=$PMIX_RANK
-
-# --nnodes=$PJM_NODE_ITR \
-# --nnodes=$PJM_NODE_ITR \
-
+export RANK=$PJM_NODE_RANK
 
 torchrun \
-    --nnodes=2 \
+    --nnodes=$PJM_NODE_ITR \
     --nproc_per_node=2 \
     --node_rank=$RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    examples/example_distributed_training.py
+    examples/train_dist.py
 
 echo ""
 echo "Done!"

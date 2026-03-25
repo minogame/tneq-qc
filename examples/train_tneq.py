@@ -23,9 +23,7 @@ PHYS_DIM = 2
 N_STEPS  = 500
 LR       = 0.01
 LOG_EVERY = 10
-
-torch.manual_seed(42)
-np.random.seed(42)
+SAVE_PATH = "checkpoints/tneq_student.safetensors"
 
 
 def get_val(result):
@@ -40,7 +38,8 @@ def get_val(result):
 
 
 def main():
-    backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
+    device = os.environ.get('TNEQ_DEVICE', 'cpu')
+    backend = BackendFactory.create_backend('pytorch', device=device, dtype='float32')
     engine = EngineCommon(backend=backend, strategy_mode="full")
 
     # Teacher (fixed)
@@ -55,6 +54,7 @@ def main():
     combined = QCTN.concat([('u', student), ('t', teacher)])
     combined.set_trace('all')
 
+    print(f"Device: {device}")
     print(f"Teacher: {teacher.ncores} cores")
     print(f"Student: {student.ncores} cores, {len(combined.parameters())} trainable")
     print(f"Tr(student * teacher) = {get_val(engine.contract(combined))}")
@@ -74,6 +74,38 @@ def main():
     final_trace = get_val(engine.contract(combined))
     print(f"\nDone. Initial={loss_history[0]:.6f}  Final={loss_history[-1]:.6f}  "
           f"Trace={final_trace:.6f}")
+
+    # Save model
+    os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
+    student.save_cores(SAVE_PATH, metadata={
+        'n_qubits': str(N_QUBITS),
+        'n_steps': str(N_STEPS),
+        'final_loss': f"{loss_history[-1]:.6f}",
+        'final_trace': f"{final_trace:.6f}",
+    })
+    print(f"Model saved: {SAVE_PATH}")
+
+    # Validation: reload and compare
+    print("\n=== Validation ===")
+    student_loaded = QCTN(graph, backend=backend).auto_init()
+    student_loaded.load_cores(SAVE_PATH)
+
+    combined_val = QCTN.concat([('u', student_loaded), ('t', teacher)])
+    combined_val.set_trace('all')
+    loaded_trace = get_val(engine.contract(combined_val))
+    print(f"  Loaded trace : {loaded_trace:.6f}")
+    print(f"  Expected     : {final_trace:.6f}")
+    print(f"  Error        : {abs(loaded_trace - final_trace):.2e}")
+
+    # Per-core error
+    print("\n  Per-core comparison (student vs loaded):")
+    for core_name in student.cores:
+        orig = student.cores_weights[core_name]
+        load = student_loaded.cores_weights[core_name]
+        orig_np = backend.tensor_to_numpy(orig.tensor * orig.scale if isinstance(orig, TNTensor) else orig)
+        load_np = backend.tensor_to_numpy(load.tensor * load.scale if isinstance(load, TNTensor) else load)
+        err = np.max(np.abs(orig_np - load_np))
+        print(f"    Core '{core_name}': max_abs_error={err:.2e}")
 
 
 if __name__ == "__main__":
