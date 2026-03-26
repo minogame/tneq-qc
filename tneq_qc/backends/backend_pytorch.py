@@ -188,8 +188,8 @@ class BackendPyTorch(ComputeBackend):
             raw_params = []
             is_tntensor_info = []
 
-            # print('params: ', params, len(params))
-            # print('grads: ', grads, len(grads))
+            # print('params: ', len(params))
+            # print('grads: ', len(grads))
             
             for p in params:
                 if hasattr(p, 'tensor') and hasattr(p, 'scale') and hasattr(p, 'auto_scale'):
@@ -451,7 +451,7 @@ class BackendPyTorch(ComputeBackend):
         """Initialize random core using QR decomposition for orthogonality."""
         from ..core.tn_tensor import TNTensor
         flat_dim = int(np.prod(shape[:len(shape)//2]))
-
+        # print(f"flat_dim: {flat_dim}")
         random_matrix = self.torch.randn(
             (flat_dim, flat_dim),
             device=self.backend_info.device,

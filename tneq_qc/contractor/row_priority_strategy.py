@@ -387,6 +387,9 @@ def _contract_group(
 
     remaining_in_edges = [edge for _, edge in collected_in_edges]
     remaining_out_edges = [edge for _, edge in collected_out_edges]
+    
+    if isinstance(result_tensor, TNTensor):
+        result_tensor.auto_scale()
 
     return {
         'core_idx': -1 - qubit_idx,

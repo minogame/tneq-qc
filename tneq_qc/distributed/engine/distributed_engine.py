@@ -780,79 +780,97 @@ class EngineDistributed(EngineCommon):
         """Execute local contraction (Stage 0) via EngineCommon."""
         return super().contract(self._local_qctn)
     
-    def _contract_reduce_stage(self, stage_idx: int, 
+    def _contract_reduce_stage(self, stage_idx: int,
                                 local_result: 'torch.Tensor') -> 'torch.Tensor':
-        """
-        Execute a reduction stage using tensor parallel matrix multiplication.
-        
-        In stage k (1-indexed):
-        - Group size = 2^k
-        - Each group of 2^k ranks performs pairwise TP matrix multiplication
-        - First stage: n matrices -> n/2 matrices (pairs: [0,1], [2,3], ...)
-        - Second stage: 4 ranks per group, left 2 ranks have one matrix, right 2 have another
-        
-        Args:
-            stage_idx: Which reduction stage (1-indexed)
-            local_result: This worker's current result tensor
-            
-        Returns:
-            Reduced result after this stage
+        """Execute a reduction stage by exchanging results and contracting via einsum.
+
+        Each partition's local contraction result has open boundary dims
+        corresponding to cross-partition edges. The dims are ordered by
+        ``_contract_remaining``: in-boundaries sorted by qubit_idx, then
+        out-boundaries sorted by qubit_idx.
+
+        Matching rule:
+        - My out-boundary edges = partner's in-boundary edges (same cross edges)
+        - My in-boundary edges = partner's out-boundary edges
+
+        So the einsum contracts all spatial dims: ``a I O, a O I -> a``.
         """
         import torch
-        
-        # Synchronize before starting stage to ensure all ranks are ready
-        local_print(f"[Rank {self.rank}] Entering stage {stage_idx}, synchronizing...")
-        try:
-            self.comm.barrier()
-            local_print(f"[Rank {self.rank}] Stage {stage_idx} barrier passed")
-        except Exception as e:
-            print(f"[Rank {self.rank}] ERROR: Barrier failed at stage {stage_idx}: {e}")
-            raise
-        
-        # Compute group membership
+        import opt_einsum
+
+        self.comm.barrier()
+
+        # --- Determine partner rank (pairwise in stage 1) ---
         group_size = 2 ** stage_idx
+        half = group_size // 2
         my_group = self.rank // group_size
-        my_position_in_group = self.rank % group_size
+        my_pos = self.rank % group_size
         group_start = my_group * group_size
-        group_end = group_start + group_size
-        group_ranks = list(range(group_start, min(group_end, self.world_size)))
-        
-        # Determine which "sub-matrix" this rank belongs to (left or right half of group)
-        half_group_size = group_size // 2
-        is_left_half = my_position_in_group < half_group_size
-        
-        # Get cross edges between adjacent partitions for this stage
+
+        if my_pos < half:
+            partner_rank = group_start + my_pos + half
+        else:
+            partner_rank = group_start + my_pos - half
+
+        # --- Unwrap TNTensor ---
+        if isinstance(local_result, TNTensor):
+            my_log_scale = local_result.log_scale
+            local_tensor = local_result.tensor
+        else:
+            my_log_scale = 0.0
+            local_tensor = local_result
+
+        # --- Exchange tensors ---
+        partner_tensor = self._exchange_tensor_with_partner(local_tensor, partner_rank)
+
+        # --- Exchange log scales ---
+        my_ls = torch.tensor([my_log_scale], device=local_tensor.device, dtype=torch.float64)
+        partner_ls = torch.zeros(1, device=local_tensor.device, dtype=torch.float64)
+        tag = 200 + stage_idx
+        if self.rank < partner_rank:
+            self.comm.send(my_ls, partner_rank, tag=tag)
+            self.comm.recv(partner_rank, tag=tag, tensor=partner_ls)
+        else:
+            self.comm.recv(partner_rank, tag=tag, tensor=partner_ls)
+            self.comm.send(my_ls, partner_rank, tag=tag)
+
+        # --- Count in / out boundary dims for my partition ---
         cross_edges = self._get_cross_edges_for_stage(stage_idx, my_group)
-        
-        # Extract the qubit indices that are contracted in this stage
-        contract_qubit_indices = set()
-        for edge in cross_edges:
-            contract_qubit_indices.add(edge['qubit_idx'])
-        contract_qubit_indices = sorted(contract_qubit_indices)
-        
-        local_print(f"[Rank {self.rank}] Stage {stage_idx}: group={my_group}, "
-              f"is_left={is_left_half}, contract_qubits={contract_qubit_indices}")
-        
-        # Perform TP matrix multiplication
-        result = self._tensor_parallel_matmul(
-            local_result,
-            stage_idx,
-            group_ranks,
-            my_position_in_group,
-            is_left_half,
-            contract_qubit_indices
-        )
-        
-        # Synchronize after stage completion
-        local_print(f"[Rank {self.rank}] Stage {stage_idx} complete, synchronizing...")
-        try:
-            self.comm.barrier()
-            local_print(f"[Rank {self.rank}] Stage {stage_idx} exit barrier passed")
-        except Exception as e:
-            local_print(f"[Rank {self.rank}] ERROR: Exit barrier failed at stage {stage_idx}: {e}")
-            raise
-        
-        return result
+        my_partition = self.rank
+
+        n_in = sum(1 for e in cross_edges if e['to_partition'] == my_partition)
+        n_out = sum(1 for e in cross_edges if e['from_partition'] == my_partition)
+        n_spatial = n_in + n_out
+
+        local_print(f"[Rank {self.rank}] Reduce stage {stage_idx}: "
+                     f"n_in={n_in}, n_out={n_out}, "
+                     f"my shape={local_tensor.shape}, partner shape={partner_tensor.shape}")
+
+        # --- Build einsum equation ---
+        # My tensor dims:      [batch, in_0..in_{K-1}, out_0..out_{M-1}]
+        # Partner tensor dims:  [batch, in_0'..in_{M-1}', out_0'..out_{K-1}']
+        #   where partner's in = my out, partner's out = my in
+        # Contract ALL spatial dims -> result is [batch]
+
+        batch_sym = 'a'
+        in_syms = [opt_einsum.get_symbol(2 + i) for i in range(n_in)]
+        out_syms = [opt_einsum.get_symbol(2 + n_in + i) for i in range(n_out)]
+
+        my_part = batch_sym + ''.join(in_syms) + ''.join(out_syms)
+        # Partner's in-dims match my out-dims; partner's out-dims match my in-dims
+        partner_part = batch_sym + ''.join(out_syms) + ''.join(in_syms)
+
+        einsum_eq = f"{my_part},{partner_part}->{batch_sym}"
+
+        local_print(f"[Rank {self.rank}] Reduce einsum: {einsum_eq}")
+
+        result = torch.einsum(einsum_eq, local_tensor, partner_tensor)
+
+        combined_log_scale = my_log_scale + partner_ls.item()
+
+        self.comm.barrier()
+
+        return TNTensor(result, log_scale=combined_log_scale)
     
     def _get_cross_edges_for_stage(self, stage_idx: int, my_group: int) -> List[Dict]:
         """
@@ -1649,11 +1667,11 @@ class EngineDistributed(EngineCommon):
         for name in self._local_qctn.cores:
             weight = self._local_qctn.cores_weights[name]
             if isinstance(weight, TNTensor):
-                weight.tensor.requires_grad_(True)
+                # weight.tensor.requires_grad_(True)
                 if weight.tensor.grad is not None:
                     weight.tensor.grad.zero_()
             elif isinstance(weight, torch.Tensor):
-                weight.requires_grad_(True)
+                # weight.requires_grad_(True)
                 if weight.grad is not None:
                     weight.grad.zero_()
 
@@ -1676,9 +1694,15 @@ class EngineDistributed(EngineCommon):
         for name in self._local_qctn.cores:
             weight = self._local_qctn.cores_weights[name]
             raw = weight.tensor if isinstance(weight, TNTensor) else weight
+            if not raw.requires_grad:
+                continue
+            if hasattr(raw, 'is_leaf') and not raw.is_leaf:
+                continue
             raw_core_tensors.append(raw)
             core_names.append(name)
-
+        # print(f"train core_names: {core_names}")
+        # print(f"raw_core_tensors: {raw_core_tensors}")
+        # exit()
         gradients = torch.autograd.grad(
             outputs=loss_val,
             inputs=raw_core_tensors,
