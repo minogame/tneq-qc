@@ -19,10 +19,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image
 from torchvision import datasets, transforms
-from tneq_qc import QCTN, EngineCommon, BackendFactory
+from tneq_qc import QCTN, EngineCommon, BackendFactory, create_optimizer
 from tneq_qc.core.tn_tensor import TNTensor
 from tneq_qc.utils.graph_generators import QCTNHelper
-from tneq_qc.optim import Adam
 
 
 N_QUBITS   = 5
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     print(f"Training  epochs={N_EPOCHS}  lr={LR}  optimizer=Adam")
     print("=" * 60)
 
-    optimizer = Adam(model2.parameters(), backend, lr=LR)
+    optimizer = create_optimizer("adam", model2.parameters(), backend=backend, lr=LR)
     loss_history = []
 
     for step in range(1, N_EPOCHS + 1):

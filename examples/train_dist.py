@@ -19,7 +19,7 @@ import numpy as np
 
 from tneq_qc import (
     QCTN, BackendFactory, Quadratic,
-    DataGenerator, make_data_fn, SGDG,
+    DataGenerator, make_data_fn, create_optimizer,
 )
 from tneq_qc.distributed import EngineDistributed
 from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
@@ -95,7 +95,9 @@ def main():
         dist.barrier()
 
     # Train
-    optimizer = SGDG(combined.parameters(), backend, lr=LR / world_size)
+    optimizer = create_optimizer(
+        "sgdg", combined.parameters(), backend=backend, lr=LR / world_size
+    )
     data_fn = make_data_fn(data_gen, combined, batch_size=BATCH_SIZE, K=PHYS_DIM)
     loss_history = []
 

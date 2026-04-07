@@ -67,8 +67,8 @@ class EngineCommon:
             strategy_mode (str): Contraction strategy mode:
 
                 - ``'fast'``: einsum only (fastest compilation)
-                - ``'balanced'``: einsum + MPS chain (default)
-                - ``'full'``: all available strategies
+                - ``'balanced'``: row-priority only (default)
+                - ``'full'``: row-priority only
 
             nqubits (int, optional): Total number of qubits.  If ``None``
                 (default), inferred from the QCTN at contraction time.

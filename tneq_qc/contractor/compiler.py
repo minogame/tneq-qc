@@ -17,7 +17,7 @@ class StrategyCompiler:
     MODES = {
         'fast': ['einsum_default'],
         'balanced': ['row_priority'],
-        'full': ['einsum_default', 'row_priority']
+        'full': ['row_priority']
     }
     
     # Global strategy registry

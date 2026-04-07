@@ -139,7 +139,7 @@ def make_correlated_gaussian_sampler(ndim):
 
 from tneq_qc import (
     QCTN, BackendFactory, EngineCommon, Quadratic,
-    DataGenerator, SGDG,
+    DataGenerator, create_optimizer,
 )
 
 N_QUBITS   = 1024
@@ -168,7 +168,7 @@ def data_fn(step):
         combined[name] = Mx_list[i]
 
 # 训练
-optimizer = SGDG(combined.parameters(), backend, lr=LR)
+optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
 for step in range(1, N_STEPS + 1):
     data_fn(step)
     loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
@@ -257,7 +257,7 @@ QCTNHelper.brickwall(nqubits=4, n_layers=4, phys_dim=2)
 
 from tneq_qc import (
     QCTN, BackendFactory, EngineCommon, QCTNHelper,
-    DataGenerator, SGDG,
+    DataGenerator, create_optimizer,
 )
 from tneq_qc.modules.small import CircuitState, MeasureMatrix
 
@@ -318,7 +318,7 @@ def data_fn(step):
         combined[name] = Mx_list[i]
 
 # --- 训练 ---
-optimizer = SGDG(combined.parameters(), backend, lr=LR)
+optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
 for step in range(1, N_STEPS + 1):
     data_fn(step)
     loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
@@ -631,7 +631,7 @@ def data_fn(step):
         combined[name] = Mx_list[i]
 
 # 5) 训练
-optimizer = SGDG(combined.parameters(), backend, lr=LR)
+optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
 for step in range(1, N_STEPS + 1):
     data_fn(step)
     loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')

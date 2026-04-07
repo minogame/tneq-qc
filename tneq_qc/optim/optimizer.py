@@ -1,28 +1,34 @@
+"""Legacy trainer-style optimizer wrapper.
+
+Deprecated compatibility layer around the new optimizer registry.
+"""
+
+from __future__ import annotations
+
 import random
-from typing import Callable, Optional
-from ..core.tn_tensor import TNTensor
+import warnings
+from typing import Optional
+
+from .registry import create_optimizer
+
 
 class Optimizer:
-    """
-    Optimizer class for optimization tasks.
-    
-    This class provides methods to optimize functions using the configured backend.
-    """
+    """Legacy trainer wrapper that internally uses a modern optimizer."""
 
-    def __init__(self, method='adam', 
-                   learning_rate=0.01, 
-                   max_iter=1000, 
-                   tol=1e-6, # Tolerance for convergence
-                   beta1=0.9, # Adam's first moment estimate decay rate
-                   beta2=0.999, # Adam's second moment estimate decay rate
-                   epsilon=1e-8, # Small constant to prevent division by zero
-                   engine=None,
-                   lr_schedule: Optional[list] = None,
-                   # SGDG parameters
-                   momentum=0.0, # Momentum factor for SGDG
-                   stiefel=True, # Whether to use Stiefel manifold optimization
-               ):
-
+    def __init__(
+        self,
+        method='adam',
+        learning_rate=0.01,
+        max_iter=1000,
+        tol=1e-6,
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-8,
+        engine=None,
+        lr_schedule: Optional[list] = None,
+        momentum=0.0,
+        stiefel=True,
+    ):
         self.method = method
         self.max_iter = max_iter
         self.learning_rate = learning_rate
@@ -34,80 +40,92 @@ class Optimizer:
         self.momentum = momentum
         self.stiefel = stiefel
         self.lr_schedule = lr_schedule
-
         self.engine = engine
         self.opt_state = {}
+        self._optimizer = None
+
+        warnings.warn(
+            "`tneq_qc.optim.optimizer.Optimizer` is legacy. "
+            "Prefer `create_optimizer(...)` or built-in optimizer classes directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    def _optimizer_kwargs(self):
+        kwargs = {"lr": self.learning_rate}
+        method = str(self.method).lower()
+        if method == "adam":
+            kwargs.update({
+                "beta1": self.beta1,
+                "beta2": self.beta2,
+                "epsilon": self.epsilon,
+            })
+        elif method == "momentum":
+            kwargs.update({"momentum": self.momentum})
+        elif method == "rmsprop":
+            kwargs.update({"epsilon": self.epsilon})
+        elif method == "sgdg":
+            kwargs.update({
+                "momentum": self.momentum,
+                "stiefel": self.stiefel,
+                "epsilon": self.epsilon,
+            })
+        return kwargs
+
+    def _ensure_optimizer(self, params_list):
+        if self._optimizer is None:
+            backend = self.engine.backend if self.engine is not None else None
+            self._optimizer = create_optimizer(
+                self.method,
+                params_list,
+                backend=backend,
+                **self._optimizer_kwargs(),
+            )
+        return self._optimizer
+
+    def _sync_legacy_state(self):
+        if self._optimizer is None:
+            return
+        self.opt_state = self._optimizer.state
+        self.learning_rate = self._optimizer.lr
 
     def _apply_lr_schedule(self):
-        """Update the current learning rate via lr_schedule if provided.
-        
-        If lr_schedule is None, the learning_rate remains constant.
-        If lr_schedule is provided, it should be a list of (step, lr) tuples,
-        sorted by step in ascending order. The learning rate will be set to
-        the lr value corresponding to the largest step <= current iteration.
-        
-        Example:
-            lr_schedule = [(0, 1e-2), (200, 1e-3), (800, 1e-4)]
-            - step 0-199: lr = 1e-2
-            - step 200-799: lr = 1e-3
-            - step >= 800: lr = 1e-4
-        """
         if self.lr_schedule is None:
             return
 
         for step, lr in reversed(self.lr_schedule):
             if self.iter >= step:
                 self.learning_rate = lr
+                if self._optimizer is not None:
+                    self._optimizer.lr = lr
                 return
 
     def optimize(self, qctn, data_list, **kwargs):
-        """
-        Optimize a function.
-        
-        Args:
-            qctn (QCTN): The quantum circuit tensor network to optimize.
-            kwargs: Additional arguments for different optimization modes.
-
-        Returns:
-            None: The function modifies the qctn in place.
-        """
-        # eval_fn = getattr(self, "eval_fn", None)
-        # metrics = eval_fn(self.iter + 1, qctn)
-        # print(f"Iteration {self.iter}: metrics: {metrics}")
-
-        # exit()
-
         loss_value = 0
 
         while self.iter < self.max_iter:
-            # TODO: impl general function named contract_for_gradient
             data_index = self.iter % len(data_list)
-            # loss, grads = self.engine.contract_with_self_for_gradient(qctn, **data_list[data_index], **kwargs)
-            # loss, grads = self.engine.contract_with_std_graph_for_gradient(qctn, **data_list[data_index], **kwargs)
-            loss, params_list, grads = self.engine.contract_with_compiled_strategy_for_gradient(qctn, **data_list[data_index], **kwargs)
+            loss, grads = self.engine.contract_for_gradient(
+                qctn, **data_list[data_index], **kwargs
+            )
+            params_list = qctn.parameters()
 
-            # Convert loss to scalar for comparison and printing
             loss_value = float(loss) if hasattr(loss, 'item') else loss
             self._apply_lr_schedule()
 
-            # Optional: log training loss to TensorBoard
             summary_writer = getattr(self, "summary_writer", None)
             if summary_writer is not None:
                 try:
                     summary_writer.add_scalar("train/loss", loss_value, self.iter)
                 except Exception:
-                    # 防止外部 writer 出错中止训练
                     pass
 
             if self.tol and loss_value < self.tol:
                 print(f"Convergence achieved at iteration {self.iter} with loss {loss_value}.")
                 break
-            
-            # print(f"Iteration {self.iter}: loss = {loss_value} lr = {self.learning_rate}")
 
-            self.step(params_list, grads)
+            self.step(params_list, list(grads))
 
-            # Step-based evaluation hook
             eval_every = getattr(self, "eval_every", 0)
             eval_fn = getattr(self, "eval_fn", None)
             if eval_every and eval_fn is not None and ((self.iter + 1) % eval_every == 0):
@@ -117,20 +135,17 @@ class Optimizer:
                     print(f"[Optimizer] Eval function raised an exception at iter {self.iter + 1}: {e}")
                     metrics = None
 
-                # Optional: log eval metrics to TensorBoard
                 if metrics and summary_writer is not None:
                     for name, value in metrics.items():
                         try:
                             scalar = float(value)
                         except Exception:
                             continue
-                            # skip non-scalar metric
                         try:
                             summary_writer.add_scalar(f"eval/{name}", scalar, self.iter + 1)
                         except Exception:
                             pass
 
-            # Step-based checkpoint hook
             save_every = getattr(self, "save_every", 0)
             checkpoint_fn = getattr(self, "checkpoint_fn", None)
             if save_every and checkpoint_fn is not None and ((self.iter + 1) % save_every == 0):
@@ -146,97 +161,45 @@ class Optimizer:
         return loss_value
 
     def optimize_debug(self, qctn, data_list, **kwargs):
-        """
-        Optimize a function.
-        
-        Args:
-            qctn (QCTN): The quantum circuit tensor network to optimize.
-            kwargs: Additional arguments for different optimization modes.
-
-        Returns:
-            None: The function modifies the qctn in place.
-        """
-        debug = True
         while self.iter < self.max_iter:
-            # TODO: impl general function named contract_for_gradient
             data_index = self.iter % len(data_list)
-            loss, grads = self.engine.contract_with_self_for_gradient(qctn, **data_list[data_index], **kwargs)
-            
-            # Convert loss to scalar for comparison and printing
+            loss, grads = self.engine.contract_for_gradient(
+                qctn, **data_list[data_index], **kwargs
+            )
+
             loss_value = float(loss) if hasattr(loss, 'item') else loss
             self._apply_lr_schedule()
             if self.tol and loss_value < self.tol:
                 print(f"Convergence achieved at iteration {self.iter} with loss {loss_value}.")
                 break
-            
+
             print(f"Iteration {self.iter}: loss = {loss_value}")
-
-            # Update parameters using the optimizer step
-            # Adaptive LR logic - commented out for backend agnosticism
-            # if self.iter < 1000:
-            #     max_grad = 0.0
-            #     for i in range(len(grads)):
-            #         grad = grads[i].abs().max()
-            #         if grad > max_grad:
-            #             max_grad = grad
-            # 
-            #     if max_grad < 1e-5:
-            #         # self.learning_rate = self.learning_rate * 1e-2 / (max_grad + 1e-30)
-            #         self.learning_rate = self.learning_rate / (max_grad + 1e-30) * 1e-9
-                
-            self.step(qctn, grads)
-
+            self.step(qctn.parameters(), list(grads))
             self.iter += 1
-
         else:
             print(f"Maximum iterations reached: {self.max_iter} with final loss {loss_value}.")
 
     def optimize_with_target(self, qctn, target_qctn):
-        """
-        Optimize a function.
-        
-        Args:
-            qctn (QCTN): The quantum circuit tensor network to optimize.
-            target_qctn (QCTN): The target quantum circuit tensor network for optimization.
-
-        Returns:
-            None: The function modifies the qctn in place.
-        """
-
         while self.iter < self.max_iter:
-            loss, grads = qctn.contract_with_QCTN_for_gradient(target_qctn)
+            loss, grads = self.engine.contract_for_gradient(qctn, target=target_qctn, loss='mse')
             loss_value = float(loss) if hasattr(loss, 'item') else loss
             self._apply_lr_schedule()
             if loss_value < self.tol:
                 print(f"Convergence achieved at iteration {self.iter} with loss {loss_value}.")
                 break
 
-            # Update parameters using the optimizer step
-            self.step(qctn, grads)
+            self.step(qctn.parameters(), list(grads))
             self.iter += 1
         else:
             print(f"Maximum iterations reached: {self.max_iter} with final loss {loss_value}.")
 
     def optimize_self_with_inputs(self, qctn, inputs_list):
-        """
-        Optimize a function using self-contraction and given inputs.
-        
-        Args:
-            qctn (QCTN): The quantum circuit tensor network to optimize.
-            inputs_list (list): List of input arrays for the contraction.
-
-        Returns:
-            None: The function modifies the qctn in place.
-        """
-
         input_index_list = list(range(len(inputs_list)))
-        # shuffle input_index_list
         train_index_list = random.sample(input_index_list, len(input_index_list))
         print(f"train_index_list : {train_index_list}")
 
         while self.iter < self.max_iter:
             inputs = inputs_list[train_index_list[self.iter % len(inputs_list)]]
-
             loss, grads = qctn.contract_with_self_for_gradient(inputs)
             loss_value = float(loss) if hasattr(loss, 'item') else loss
             self._apply_lr_schedule()
@@ -244,38 +207,13 @@ class Optimizer:
                 print(f"Convergence achieved at iteration {self.iter} with loss {loss_value}.")
                 break
 
-            # Update parameters using the optimizer step
-            self.step(qctn, grads)
+            self.step(qctn.parameters(), list(grads))
             self.iter += 1
         else:
             print(f"Maximum iterations reached: {self.max_iter} with final loss {loss_value}.")
 
-
     def step(self, params_list, grads):
-        """
-        Perform a single optimization step.
-        
-        Args:
-            qctn (QCTN): The quantum circuit tensor network to optimize.
-            grads (array-like): The gradients computed from the loss function.
-
-        Returns:
-            None: The function modifies the qctn parameters in place.
-        """
-
-        hyperparams = {
-            'learning_rate': self.learning_rate,
-            'beta1': self.beta1,
-            'beta2': self.beta2,
-            'epsilon': self.epsilon,
-            'iter': self.iter,
-            'momentum': self.momentum,
-            'stiefel': self.stiefel
-        }
-        
-        new_params_list, new_state = self.engine.backend.optimizer_update(
-            params_list, grads, self.opt_state, self.method, hyperparams
-        )
-        
-        self.opt_state = new_state
-        
+        optimizer = self._ensure_optimizer(params_list)
+        optimizer.lr = self.learning_rate
+        optimizer.step(grads)
+        self._sync_legacy_state()

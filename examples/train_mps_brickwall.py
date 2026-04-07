@@ -37,7 +37,7 @@ import opt_einsum
 
 from tneq_qc import (
     QCTN, BackendFactory, EngineCommon,
-    DataGenerator, SGDG,
+    DataGenerator, create_optimizer,
 )
 from tneq_qc.modules.small import CircuitState, MeasureMatrix
 
@@ -245,7 +245,7 @@ def main():
             combined[name] = Mx_list[i]
 
     # Train
-    optimizer = SGDG(combined.parameters(), backend, lr=LR)
+    optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     loss_history = []
 
     print(f"\nTraining: {N_STEPS} steps, batch={BATCH_SIZE}, lr={LR}")

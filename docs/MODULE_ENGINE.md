@@ -30,7 +30,7 @@ EngineCommon(
 | Parameter | Description |
 |---|---|
 | `backend` | `'pytorch'` / `'jax'` or an already created `ComputeBackend` instance |
-| `strategy_mode` | `'fast'`=Einsum only; `'balanced'`=Einsum+RowPriority; `'full'`=all strategies |
+| `strategy_mode` | `'fast'`=Einsum only; `'balanced'`=RowPriority only; `'full'`=RowPriority only |
 | `nqubits` | Usually does not need to be specified manually, automatically inferred from QCTN |
 
 ---

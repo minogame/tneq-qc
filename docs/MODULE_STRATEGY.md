@@ -116,8 +116,8 @@ compiler = StrategyCompiler(mode='balanced')
 
 # mode options:
 # 'fast'      → Only tries EinsumStrategy
-# 'balanced'  → Tries Einsum + RowPriority
-# 'full'      → Tries all registered strategies
+# 'balanced'  → Only tries RowPriorityStrategy
+# 'full'      → Only tries RowPriorityStrategy
 
 compute_fn, strategy_name, cost = compiler.compile(qctn, shapes_info, backend)
 result = compute_fn(cores_dict, circuit_states, measures)
@@ -181,9 +181,9 @@ print(get_contraction_strategy_modes())
 | Scenario | Recommended mode | Reason |
 |---|---|---|
 | Quick prototyping (qubit < 15) | `'fast'` | EinsumStrategy compiles fast and executes fast |
-| Regular training (qubit 15-100) | `'balanced'` | RowPriority controls memory usage |
-| Large-scale training (qubit 100+) | `'full'` | Lets the compiler fully evaluate all strategies |
-| Custom/hybrid topologies | `'full'` | Ensures no applicable strategy is overlooked |
+| Regular training (qubit 15-100) | `'balanced'` | Directly uses RowPriority and avoids einsum selection |
+| Large-scale training (qubit 100+) | `'full'` | Directly uses RowPriority for stable large-scale contraction |
+| Quadratic / batched Mx training | `'full'` | Avoids selecting einsum on embedded batched measurement cores |
 
 Users only need to specify `strategy_mode` when creating `EngineCommon`; there is no need to operate strategies directly:
 

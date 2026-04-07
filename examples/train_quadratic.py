@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 from tneq_qc import (
     QCTN, TNTensor, EngineCommon, BackendFactory, Quadratic,
-    DataGenerator, make_data_fn, SGDG,
+    DataGenerator, make_data_fn, create_optimizer,
 )
 
 N_QUBITS   = 4
@@ -144,7 +144,7 @@ def main():
         print(f"Forward check: shape={tuple(result.shape)} eff={result.tensor * result.scale}")
 
     # Train
-    optimizer = SGDG(combined.parameters(), backend, lr=LR)
+    optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     data_fn = make_data_fn(data_gen, combined, batch_size=BATCH_SIZE, K=PHYS_DIM)
     loss_history = []
 

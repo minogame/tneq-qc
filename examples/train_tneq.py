@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import numpy as np
 
-from tneq_qc import QCTN, EngineCommon, BackendFactory, SGDG
+from tneq_qc import QCTN, EngineCommon, BackendFactory, create_optimizer
 from tneq_qc.core.tn_tensor import TNTensor
 
 N_QUBITS = 4
@@ -60,7 +60,7 @@ def main():
     print(f"Tr(student * teacher) = {get_val(engine.contract(combined))}")
 
     # Train
-    optimizer = SGDG(combined.parameters(), backend, lr=LR)
+    optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     loss_history = []
 
     for step in range(1, N_STEPS + 1):

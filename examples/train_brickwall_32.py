@@ -22,14 +22,14 @@ import numpy as np
 
 from tneq_qc import (
     QCTN, BackendFactory, EngineCommon, QCTNHelper,
-    DataGenerator, SGDG,
+    DataGenerator, create_optimizer,
 )
 from tneq_qc.modules.small import CircuitState, MeasureMatrix
 
-N_QUBITS   = 32
-N_LAYERS   = 4        # brickwall layers (m = n_layers // 2 cores per row-pair)
-PHYS_DIM   = 4
-BATCH_SIZE = 1024
+N_QUBITS   = 10
+N_LAYERS   = 20        # brickwall layers (m = n_layers // 2 cores per row-pair)
+PHYS_DIM   = 2
+BATCH_SIZE = 128
 N_STEPS    = 100
 LR         = 0.01
 LOG_EVERY  = 10
@@ -86,6 +86,7 @@ def main():
 
     # 4) Hermitian conjugate of brickwall
     bw_hermit = brickwall.hermit()
+    
 
     # 5) CircuitState bra
     circuit_bra = circuit.bra()
@@ -122,7 +123,7 @@ def main():
             combined[name] = Mx_list[i]
 
     # Train
-    optimizer = SGDG(combined.parameters(), backend, lr=LR)
+    optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     loss_history = []
 
     print(f"\nTraining: {N_STEPS} steps, batch={BATCH_SIZE}, lr={LR}")

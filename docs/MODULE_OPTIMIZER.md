@@ -1,60 +1,105 @@
 # Optimizer Module Documentation
 
-> Optimizer and learning rate scheduling — PyTorch-style parameter update interface
+> Optimizer, registry, and learning-rate scheduling
 
 ---
 
 ## 1. Overview
 
-tneq-qc provides a PyTorch-style optimizer framework located in `tneq_qc/optim/`. All optimizers inherit from `OptimizerBase` and internally delegate to `ComputeBackend.optimizer_update()` for actual parameter updates, ensuring backend transparency.
+tneq-qc now uses a backend-decoupled optimizer design.
+
+- `EngineCommon` computes `loss, grads`
+- optimizers own update rules and optimizer state
+- backend participation is reduced to low-level tensor operations via `TensorOps`
+- custom optimizers can be registered outside the framework
+
+Public entry points:
 
 ```python
-from tneq_qc import Adam, SGD, SGDG, Momentum, RMSProp, StepLRScheduler
+from tneq_qc import (
+    Adam, SGD, SGDG, Momentum, RMSProp,
+    StepLRScheduler,
+    create_optimizer,
+    register_optimizer,
+    get_registered_optimizers,
+)
 ```
 
 ---
 
-## 2. OptimizerBase
+## 2. Core Pieces
+
+### 2.1 OptimizerBase
 
 **Location**: `tneq_qc/optim/base.py`
 
-Base class for all optimizers:
+All modern optimizers inherit from `OptimizerBase`.
+
+Core interface:
 
 ```python
 class OptimizerBase:
-    def __init__(self, params, backend, lr=0.01, **kwargs):
+    def __init__(self, params, backend=None, ops=None, lr=0.01, **kwargs):
         ...
 
     def step(self, grads):
-        """Update parameters with gradients."""
         ...
 
     def zero_grad(self):
-        """Clear gradients."""
         ...
 
     @property
     def state(self):
-        """Current optimizer state dictionary."""
+        ...
+
+    def state_dict(self):
+        ...
+
+    def load_state_dict(self, state_dict):
         ...
 ```
 
-**Constructor parameters**:
+Constructor notes:
 
 | Parameter | Type | Description |
 |---|---|---|
-| `params` | `list[Tensor]` | List of trainable parameters, typically obtained from `qctn.parameters()` |
-| `backend` | `ComputeBackend` | Compute backend instance |
-| `lr` | `float` | Learning rate, default 0.01 |
-| `**kwargs` | | Additional hyperparameters passed to specific optimizers |
+| `params` | `list[TNTensor]` | Trainable parameters, typically from `qctn.parameters()` |
+| `backend` | `ComputeBackend \| None` | Compatibility shortcut; used to construct `BackendTensorOps` |
+| `ops` | `TensorOps \| None` | Explicit tensor-ops adapter |
+| `lr` | `float` | Learning rate |
+| `**kwargs` | | Optimizer-specific hyperparameters |
 
-**Core methods**:
+Typical usage:
 
 ```python
-# Standard training loop
 loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
-optimizer.step(list(grads))   # grads is a list of gradient tensors
+optimizer.step(list(grads))
 ```
+
+### 2.2 TensorOps
+
+**Location**: `tneq_qc/optim/ops.py`
+
+Optimizers no longer depend on backend-owned optimizer algorithms. They only require a minimal tensor-op interface:
+
+- `zeros_like`
+- `sqrt`
+- `conj`
+- `abs_square`
+- `copy_into`
+- `replace`
+
+The default adapter is `BackendTensorOps`, which wraps the existing backend.
+
+### 2.3 Registry / Factory
+
+**Location**: `tneq_qc/optim/registry.py`
+
+Custom and built-in optimizers are instantiated through:
+
+- `register_optimizer(name, optimizer_cls)`
+- `get_registered_optimizers()`
+- `create_optimizer(name, params, *, backend=None, ops=None, **kwargs)`
 
 ---
 
@@ -62,169 +107,264 @@ optimizer.step(list(grads))   # grads is a list of gradient tensors
 
 ### 3.1 Adam
 
-Adaptive moment estimation optimizer.
-
 ```python
-optimizer = Adam(params, backend, lr=0.01, beta1=0.9, beta2=0.999, eps=1e-8)
+optimizer = create_optimizer(
+    "adam",
+    params,
+    backend=backend,
+    lr=0.01,
+    beta1=0.9,
+    beta2=0.999,
+    epsilon=1e-8,
+)
 ```
 
-| Parameter | Default | Description |
-|---|---|---|
-| `lr` | 0.01 | Learning rate |
-| `beta1` | 0.9 | First moment decay rate |
-| `beta2` | 0.999 | Second moment decay rate |
-| `eps` | 1e-8 | Numerical stability constant |
-
-**Use case**: Default choice for most training tasks.
+Use case: default choice for many unconstrained training tasks.
 
 ### 3.2 SGD
 
-Stochastic gradient descent.
-
 ```python
-optimizer = SGD(params, backend, lr=0.01)
+optimizer = create_optimizer("sgd", params, backend=backend, lr=0.01)
 ```
 
-**Use case**: Simple tasks, debugging.
+Use case: simple baselines and debugging.
 
 ### 3.3 SGDG
 
-Gradient descent on the Stiefel manifold (Cayley transform), guaranteeing that parameters remain orthogonal after updates.
+`SGDG` is now supported by the new optimizer path and no longer relies on `backend.optimizer_update(...)`.
 
 ```python
-optimizer = SGDG(params, backend, lr=0.01)
+optimizer = create_optimizer(
+    "sgdg",
+    params,
+    backend=backend,
+    lr=0.01,
+    momentum=0.9,
+    stiefel=True,
+)
 ```
 
-**Use case**: Recommended choice for tensor network training. Orthogonality constraints help maintain numerical stability and prevent parameter degeneration. Particularly effective for density estimation (NLL loss) tasks.
+Behavior:
+
+- supports Stiefel-manifold updates via Cayley transform
+- handles complex tensors using conjugate transpose where required
+- reshapes higher-order cores into matrices during the update, then restores the original shape
+
+Use case: tensor-network training where orthogonality matters, especially NLL / density-estimation setups.
 
 ### 3.4 Momentum
 
-SGD with momentum.
-
 ```python
-optimizer = Momentum(params, backend, lr=0.01, momentum=0.9)
+optimizer = create_optimizer(
+    "momentum",
+    params,
+    backend=backend,
+    lr=0.01,
+    momentum=0.9,
+)
 ```
-
-| Parameter | Default | Description |
-|---|---|---|
-| `momentum` | 0.9 | Momentum coefficient |
 
 ### 3.5 RMSProp
 
-Root mean square propagation.
-
 ```python
-optimizer = RMSProp(params, backend, lr=0.01, alpha=0.99, eps=1e-8)
+optimizer = create_optimizer(
+    "rmsprop",
+    params,
+    backend=backend,
+    lr=0.01,
+    alpha=0.99,
+    epsilon=1e-8,
+)
 ```
-
-| Parameter | Default | Description |
-|---|---|---|
-| `alpha` | 0.99 | Moving average decay rate |
-| `eps` | 1e-8 | Numerical stability constant |
 
 ---
 
-## 4. Learning Rate Scheduling
+## 4. Creating Optimizers
+
+### 4.1 Recommended Pattern
+
+Prefer the registry/factory API:
+
+```python
+from tneq_qc import create_optimizer
+
+optimizer = create_optimizer(
+    "sgdg",
+    combined.parameters(),
+    backend=backend,
+    lr=0.01,
+)
+```
+
+This is the pattern used by current `examples/train_*.py`.
+
+### 4.2 Direct Class Construction
+
+Direct construction is still supported:
+
+```python
+from tneq_qc import Adam
+
+optimizer = Adam(combined.parameters(), backend=backend, lr=1e-3)
+```
+
+Use this when you already know the concrete optimizer class.
+
+---
+
+## 5. Custom Optimizers
+
+You can define an optimizer outside the framework and register it.
+
+```python
+from tneq_qc import OptimizerBase, register_optimizer, create_optimizer
+
+class MyOptimizer(OptimizerBase):
+    method = "my_optimizer"
+
+    def update_raw_params(self, params, grads, state, hyperparams):
+        lr = hyperparams.get("learning_rate", 0.01)
+        new_params = [p - lr * g for p, g in zip(params, grads)]
+        return new_params, state
+
+register_optimizer("my_optimizer", MyOptimizer)
+
+optimizer = create_optimizer(
+    "my_optimizer",
+    qctn.parameters(),
+    backend=backend,
+    lr=1e-2,
+)
+```
+
+Reference example:
+
+- `examples/example_custom_optimizer.py`
+
+Inspect registry contents:
+
+```python
+from tneq_qc import get_registered_optimizers
+
+print(sorted(get_registered_optimizers().keys()))
+```
+
+---
+
+## 6. Learning Rate Scheduling
 
 ### StepLRScheduler
 
-Step-wise learning rate decay at fixed intervals:
+**Location**: `tneq_qc/optim/lr_scheduler.py`
 
 ```python
-scheduler = StepLRScheduler(optimizer, step_size=100, gamma=0.5)
+from tneq_qc import StepLRScheduler
+
+scheduler = StepLRScheduler(optimizer, [
+    (0, 1e-2),
+    (200, 1e-3),
+    (800, 1e-4),
+])
 
 for step in range(1000):
     loss, grads = engine.contract_for_gradient(...)
     optimizer.step(list(grads))
-    scheduler.step()   # Every 100 steps, multiply lr by 0.5
+    scheduler.step()
 ```
 
-| Parameter | Description |
-|---|---|
-| `optimizer` | The optimizer instance to schedule |
-| `step_size` | Number of steps between each decay |
-| `gamma` | Decay factor (new lr = old lr × gamma) |
+Note: `StepLRScheduler` updates `optimizer.lr` directly.
 
 ---
 
-## 5. Usage Recommendations
+## 7. Parameter Retrieval
 
-### 5.1 Optimizer Selection
-
-| Task Type | Recommended Optimizer | Reason |
-|---|---|---|
-| Density estimation (Quadratic + NLL) | `SGDG` | Orthogonality constraints preserve normalization |
-| TNEQ inner product matching | `SGDG` | Orthogonality constraints prevent scale explosion |
-| MNIST approximation | `Adam` | Adaptive learning rate suits non-convex optimization |
-| Large-scale training | `SGDG` + `StepLRScheduler` | Stable convergence |
-
-### 5.2 Parameter Retrieval
+Typical parameter sources:
 
 ```python
-# Retrieve directly from QCTN
 params = combined.parameters()
-
-# Retrieve from submodules (train only the MPS part)
-params = model._submodules['mps'].parameters()
-
-# Ensure requires_grad is set
-model._submodules['mps'].requires_grad_(True)
+params = model._submodules["mps"].parameters()
+named = combined.named_parameters()
 ```
 
-### 5.3 Complete Example
+Ensure gradient tracking is enabled before training:
 
 ```python
-from tneq_qc import SGDG, StepLRScheduler, EngineCommon
+model._submodules["mps"].requires_grad_(True)
+```
 
-engine    = EngineCommon(backend=backend, strategy_mode='full')
-optimizer = SGDG(combined.parameters(), backend, lr=0.01)
-scheduler = StepLRScheduler(optimizer, step_size=200, gamma=0.5)
+---
+
+## 8. Complete Example
+
+```python
+from tneq_qc import EngineCommon, StepLRScheduler, create_optimizer
+
+engine = EngineCommon(backend=backend, strategy_mode="full")
+optimizer = create_optimizer(
+    "sgdg",
+    combined.parameters(),
+    backend=backend,
+    lr=0.01,
+    momentum=0.9,
+    stiefel=True,
+)
+scheduler = StepLRScheduler(optimizer, [
+    (0, 1e-2),
+    (200, 5e-3),
+    (500, 1e-3),
+])
 
 for step in range(1, 1001):
     data_fn(step)
-    loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
+    loss_val, grads = engine.contract_for_gradient(combined, target=1, loss="nll")
     optimizer.step(list(grads))
     scheduler.step()
 
     if step % 100 == 0:
-        print(f"Step {step}  loss={float(loss_val):.6f}  lr={optimizer.lr:.6f}")
+        print(f"Step {step} loss={float(loss_val):.6f} lr={optimizer.lr:.6f}")
 ```
 
 ---
 
-## 6. Loss Functions
+## 9. Legacy Optimizer Wrapper
 
-Optimizers work in conjunction with loss functions. Loss functions are managed through `LossRegistry`:
+**Location**: `tneq_qc/optim/optimizer.py`
 
-### 6.1 Built-in Losses
+The old `Optimizer` class still exists for backward compatibility, but it is now a legacy trainer-style wrapper around `create_optimizer(...)`.
 
-| Name | Class | Description |
-|---|---|---|
-| `'mse'` | `MSELoss` | Mean squared error $(y - \hat{y})^2$ |
-| `'mae'` | `MAELoss` | Mean absolute error $\|y - \hat{y}\|$ |
-| `'nll'` | `NLLLoss` | Negative log-likelihood $-\log P$ |
-| `'fidelity'` | `FidelityLoss` | Quantum fidelity $-\|\langle y \| \hat{y} \rangle\|^2$ |
-| `'diagonal_mse'` | `DiagonalMSELoss` | Diagonal MSE (backward-compatible default) |
+Important notes:
 
-### 6.2 Usage
+- it emits `DeprecationWarning`
+- new code should not use it
+- it no longer owns the optimizer algorithm itself
+
+Prefer:
 
 ```python
-# String name
-loss_val, grads = engine.contract_for_gradient(qctn, target=1.0, loss='mse')
-
-# Custom function
-def my_loss(result, target, backend):
-    return backend.sum((result - target) ** 2)
-
-loss_val, grads = engine.contract_for_gradient(qctn, target=1.0, loss=my_loss)
-
-# Custom class
-from tneq_qc.losses import register_loss, BaseLoss
-
-@register_loss('weighted_mse')
-class WeightedMSE(BaseLoss):
-    def __init__(self, weight=2.0):
-        self.weight = weight
-    def compute(self, result, target, backend):
-        return self.weight * backend.mean((result - target) ** 2)
+optimizer = create_optimizer("adam", params, backend=backend, lr=1e-3)
 ```
+
+instead of:
+
+```python
+from tneq_qc.optim.optimizer import Optimizer
+```
+
+---
+
+## 10. Recommendations
+
+| Task Type | Recommended Optimizer | Reason |
+|---|---|---|
+| Density estimation (Quadratic + NLL) | `sgdg` | Orthogonality constraints preserve normalization |
+| TNEQ inner-product matching | `sgdg` | Helps control scale and geometry |
+| MNIST approximation | `adam` | Good default for unconstrained fitting |
+| Debugging / sanity checks | `sgd` | Simplest update rule |
+
+---
+
+## 11. Related Docs
+
+- `docs/PLAN_OPTIMIZER_DECOUPLING.md`
+- `docs/MODULE_ENGINE.md`
+- `docs/MODULE_OPTIMIZER.md`

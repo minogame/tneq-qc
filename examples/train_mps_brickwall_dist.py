@@ -28,7 +28,7 @@ import opt_einsum
 
 from tneq_qc import (
     QCTN, BackendFactory,
-    DataGenerator, SGDG,
+    DataGenerator, create_optimizer,
 )
 from tneq_qc.modules.small import CircuitState, MeasureMatrix
 from tneq_qc.distributed import EngineDistributed
@@ -277,7 +277,7 @@ def main():
     local_params = engine._local_qctn.parameters() if engine._local_qctn else []
     print(f"local_params: {len(local_params)}")
     # exit()
-    optimizer = SGDG(local_params, backend, lr=LR / world_size)
+    optimizer = create_optimizer("sgdg", local_params, backend=backend, lr=LR / world_size)
     loss_history = []
 
     if rank == 0:
