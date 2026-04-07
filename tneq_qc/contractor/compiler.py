@@ -16,8 +16,8 @@ class StrategyCompiler:
     # Strategy list for three modes
     MODES = {
         'fast': ['einsum_default'],
-        'balanced': ['mps_chain'],
-        'full': ['mps_chain']
+        'balanced': ['row_priority'],
+        'full': ['einsum_default', 'row_priority']
     }
     
     # Global strategy registry
@@ -49,9 +49,12 @@ class StrategyCompiler:
         
         if modes is not None:
             for mode in modes:
-                if mode in cls.MODES:
-                    if strategy.name not in cls.MODES[mode]:
-                        cls.MODES[mode].append(strategy.name)
+                if mode not in cls.MODES:
+                    raise ValueError(
+                        f"Invalid mode '{mode}'. Must be one of {list(cls.MODES.keys())}"
+                    )
+                if strategy.name not in cls.MODES[mode]:
+                    cls.MODES[mode].append(strategy.name)
     
     @classmethod
     def get_registered_strategies(cls) -> Dict[str, ContractionStrategy]:
@@ -134,3 +137,8 @@ class StrategyCompiler:
             modes: Which modes to register to, e.g. ['balanced', 'full']
         """
         self.register_strategy(strategy, modes)
+
+    @classmethod
+    def get_mode_strategies(cls) -> Dict[str, List[str]]:
+        """Return the configured strategy names for each mode."""
+        return {mode: names.copy() for mode, names in cls.MODES.items()}

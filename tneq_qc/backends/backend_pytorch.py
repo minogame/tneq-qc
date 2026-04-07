@@ -447,16 +447,30 @@ class BackendPyTorch(ComputeBackend):
         
         return Y_alpha
 
-    def init_random_core(self, shape):
+    def init_random_core(self, shape, distribution: str = "gaussian"):
         """Initialize random core using QR decomposition for orthogonality."""
         from ..core.tn_tensor import TNTensor
+
+        dist = distribution.lower()
         flat_dim = int(np.prod(shape[:len(shape)//2]))
-        # print(f"flat_dim: {flat_dim}")
-        random_matrix = self.torch.randn(
-            (flat_dim, flat_dim),
-            device=self.backend_info.device,
-            dtype=self.default_dtype,
-        )
+        if dist in {"gaussian", "normal"}:
+            random_matrix = self.torch.randn(
+                (flat_dim, flat_dim),
+                device=self.backend_info.device,
+                dtype=self.default_dtype,
+            )
+        elif dist == "uniform":
+            random_matrix = self.torch.rand(
+                (flat_dim, flat_dim),
+                device=self.backend_info.device,
+                dtype=self.default_dtype,
+            ) * 2 - 1
+        else:
+            raise ValueError(
+                f"Unsupported init distribution '{distribution}'. "
+                "Supported values: 'gaussian', 'uniform'."
+            )
+
         Q, R = self.torch.linalg.qr(random_matrix)
         d = self.torch.diag(R)
         if self.is_complex(d):

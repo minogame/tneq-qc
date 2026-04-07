@@ -193,12 +193,25 @@ class BackendJAX(ComputeBackend):
             new_params.append(param - lr * grad)
         return new_params, state
 
-    def init_random_core(self, shape):
+    def init_random_core(self, shape, distribution: str = "gaussian"):
         from ..core.tn_tensor import TNTensor
+        dist = distribution.lower()
         flat_dim = int(np.prod(shape[:len(shape)//2]))
 
         self.key, subkey = self.jax.random.split(self.key)
-        random_matrix = self.jax.random.normal(subkey, (flat_dim, flat_dim))
+        if dist in {"gaussian", "normal"}:
+            random_matrix = self.jax.random.normal(subkey, (flat_dim, flat_dim))
+        elif dist == "uniform":
+            random_matrix = self.jax.random.uniform(
+                subkey, (flat_dim, flat_dim), minval=-1.0, maxval=1.0
+            )
+        else:
+            raise ValueError(
+                f"Unsupported init distribution '{distribution}'. "
+                "Supported values: 'gaussian', 'uniform'."
+            )
+
+        random_matrix = random_matrix.astype(self.default_dtype)
         Q, R = self.jnp.linalg.qr(random_matrix)
         d = self.jnp.diag(R)
         sign_correction = self.jnp.sign(d)

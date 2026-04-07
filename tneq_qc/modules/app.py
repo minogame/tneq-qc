@@ -63,11 +63,16 @@ class MPS_with_Ref(QCTN):
         self.register_module("left", MPS(nqubits, bond_dim, phys_dim, backend))
         self.register_module("right", MPS(nqubits, bond_dim, phys_dim, backend))
 
-    def auto_init(self, dtype=None, device=None) -> "MPS_with_Ref":
+    def auto_init(
+        self,
+        dtype=None,
+        device=None,
+        distribution: str = "gaussian",
+    ) -> "MPS_with_Ref":
         """Initialize left, then wire right as conj-transpose references."""
         left = self._submodules["left"]
         right = self._submodules["right"]
-        left.auto_init(dtype=dtype, device=device)
+        left.auto_init(dtype=dtype, device=device, distribution=distribution)
         for name in left.cores:
             tensor = left.cores_weights[name]
             if isinstance(tensor, TNTensor):

@@ -40,12 +40,9 @@ def _effective(tn_tensor, backend):
     return tn_tensor.tensor * backend.detach(tn_tensor.scale)
 
 
-def _real_effective(tn_tensor, backend):
-    """Effective value; apply abs² if complex."""
-    eff = _effective(tn_tensor, backend)
-    if backend.is_complex(eff):
-        eff = backend.abs_square(eff)
-    return eff
+def _modulus_squared(tensor, backend):
+    """Return ``|tensor|^2`` for complex tensors, else ``tensor^2``."""
+    return backend.abs_square(tensor)
 
 
 # ======================================================================
@@ -68,7 +65,7 @@ class DiagonalMSELoss(BaseLoss):
 
     Loss
     ~~~~
-    ``mean((abs²(diag) * scale - target_value)²)``
+    ``mean(|diag * scale - target_value|²)``
 
     where ``target_value`` comes from the resolved target (default:
     ``ones * 1/side`` broadcast).
@@ -84,14 +81,10 @@ class DiagonalMSELoss(BaseLoss):
         return result
 
     def compute(self, result, target, backend):
-        res_tensor = result.tensor
-        res_scale = backend.detach(result.scale)
-        if backend.is_complex(res_tensor):
-            res_tensor = backend.abs_square(res_tensor)
-        effective = res_tensor * res_scale
+        effective = _effective(result, backend)
         eff_t = _effective(target, backend)
         diff = effective - eff_t
-        return backend.mean(diff * diff)
+        return backend.mean(_modulus_squared(diff, backend))
 
 
 # ======================================================================
@@ -100,16 +93,13 @@ class DiagonalMSELoss(BaseLoss):
 
 @register_loss('mse')
 class MSELoss(BaseLoss):
-    """Mean Squared Error: ``mean((eff_result - eff_target)²)``.
-
-    Complex tensors are converted to real via abs² before subtraction.
-    """
+    """Mean Squared Error: ``mean(|eff_result - eff_target|²)``."""
 
     def compute(self, result, target, backend):
-        eff_r = _real_effective(result, backend)
-        eff_t = _real_effective(target, backend)
+        eff_r = _effective(result, backend)
+        eff_t = _effective(target, backend)
         diff = eff_r - eff_t
-        return backend.mean(diff * diff)
+        return backend.mean(_modulus_squared(diff, backend))
 
 
 # ======================================================================
@@ -120,15 +110,14 @@ class MSELoss(BaseLoss):
 class MAELoss(BaseLoss):
     """Mean Absolute Error: ``mean(|eff_result - eff_target|)``.
 
-    Uses ``sqrt(diff²)`` as a differentiable absolute value.
-    Complex tensors are converted to real via abs².
+    Uses ``sqrt(|diff|²)`` as a differentiable absolute value.
     """
 
     def compute(self, result, target, backend):
-        eff_r = _real_effective(result, backend)
-        eff_t = _real_effective(target, backend)
+        eff_r = _effective(result, backend)
+        eff_t = _effective(target, backend)
         diff = eff_r - eff_t
-        return backend.mean(backend.sqrt(diff * diff + 1e-12))
+        return backend.mean(backend.sqrt(_modulus_squared(diff, backend) + 1e-12))
 
 
 # ======================================================================
@@ -142,7 +131,9 @@ class NLLLoss(BaseLoss):
     Handles TNTensor log_scale correction and complex Born rule:
     1. Extract raw tensor and log_scale from TNTensor.
     2. For complex tensors, apply Born rule: P = |W|^2.
-    3. Compute -mean(log(P) + log_scale).
+    3. For complex TNTensor amplitudes, apply ``2 * log_scale`` because
+       ``|scale * W|^2 = scale^2 * |W|^2``.
+    4. Compute ``-mean(log(P) + scale_correction)``.
     """
 
     EPS: float = 1e-10
@@ -159,11 +150,13 @@ class NLLLoss(BaseLoss):
 
         if backend.is_complex(raw):
             p = backend.real(backend.abs_square(raw))
+            scale_correction = 2.0 * log_scale
         else:
             p = raw
+            scale_correction = log_scale
 
         p = backend.clamp(p, min=self.EPS)
-        log_p = backend.log(p) + log_scale
+        log_p = backend.log(p) + scale_correction
         return -backend.mean(log_p)
 
 

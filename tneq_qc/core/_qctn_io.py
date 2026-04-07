@@ -14,7 +14,7 @@ from .tn_tensor import TNTensor
 class QCTNIOMixin:
     """Mixin: core tensor init, set_cores, save/load, auto_init."""
 
-    def _init_cores(self):
+    def _init_cores(self, distribution: str = "gaussian"):
         """
         Initialize the cores of the quantum circuit with random values.
 
@@ -41,13 +41,18 @@ class QCTNIOMixin:
 
             if input_dim == output_dim:
                 # Square case: use orthogonal (QR) initialization
-                core = self.backend.init_random_core([input_dim, output_dim])
+                core = self.backend.init_random_core(
+                    [input_dim, output_dim], distribution=distribution
+                )
                 core = self.backend.reshape(core, full_shape)
             else:
                 # Non-square case: orthogonal init is not applicable;
-                # fall back to random Gaussian (normalized by sqrt of max dim).
+                # sample a larger square matrix from the chosen distribution,
+                # orthogonalize it, then slice to the target shape.
                 max_dim = max(input_dim, output_dim)
-                core = self.backend.init_random_core([max_dim, max_dim])
+                core = self.backend.init_random_core(
+                    [max_dim, max_dim], distribution=distribution
+                )
                 # Slice to [input_dim, output_dim] then reshape
                 raw = core.tensor if isinstance(core, TNTensor) else core
                 raw_sliced = raw[:input_dim, :output_dim].contiguous()
@@ -188,7 +193,12 @@ class QCTNIOMixin:
                 if core_name in common:
                     self._set_single_core(core_name, cores[core_name])
 
-    def auto_init(self, dtype=None, device=None) -> "QCTNIOMixin":
+    def auto_init(
+        self,
+        dtype=None,
+        device=None,
+        distribution: str = "gaussian",
+    ) -> "QCTNIOMixin":
         """Initialize (or re-initialize) all core tensors with random orthogonal values.
 
         For graph-based modules, calls :meth:`_init_cores` to populate
@@ -201,14 +211,17 @@ class QCTNIOMixin:
                 for future backend-level dtype control.
             device: Optional device hint forwarded to submodule ``auto_init``
                 calls.
+            distribution: Random distribution used to generate the matrix
+                before orthogonalization. Supported values currently include
+                ``"gaussian"`` (default) and ``"uniform"``.
 
         Returns:
             self — supports chaining, e.g. ``MPS(3, 4).auto_init()``.
         """
         if self.graph is not None:
-            self._init_cores()
+            self._init_cores(distribution=distribution)
         for sub in self._submodules.values():
-            sub.auto_init(dtype=dtype, device=device)
+            sub.auto_init(dtype=dtype, device=device, distribution=distribution)
         return self
 
     def save_cores(self, file_path: Union[str, Path], metadata: Optional[Mapping[str, str]] = None):

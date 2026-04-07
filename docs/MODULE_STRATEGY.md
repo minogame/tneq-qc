@@ -136,8 +136,7 @@ Compilation flow:
 Implement the `ContractionStrategy` interface to register a new strategy:
 
 ```python
-from tneq_qc.contractor.base import ContractionStrategy
-from tneq_qc.contractor.compiler import StrategyCompiler
+from tneq_qc import ContractionStrategy, register_contraction_strategy
 
 class MyStrategy(ContractionStrategy):
     @property
@@ -159,8 +158,20 @@ class MyStrategy(ContractionStrategy):
             return result
         return compute
 
-# Register with the compiler
-StrategyCompiler.register_strategy(MyStrategy(), modes=['full'])
+# Register to one or more compiler modes
+register_contraction_strategy(MyStrategy(), modes=['full'])
+```
+
+You can also inspect the current registry and mode bindings:
+
+```python
+from tneq_qc import (
+    get_registered_contraction_strategies,
+    get_contraction_strategy_modes,
+)
+
+print(get_registered_contraction_strategies().keys())
+print(get_contraction_strategy_modes())
 ```
 
 ---
