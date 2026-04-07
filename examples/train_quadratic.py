@@ -142,7 +142,7 @@ def main():
     result = engine.contract(combined)
     if isinstance(result, TNTensor):
         print(f"Forward check: shape={tuple(result.shape)} eff={result.tensor * result.scale}")
-
+    
     # Train
     optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     data_fn = make_data_fn(data_gen, combined, batch_size=BATCH_SIZE, K=PHYS_DIM)
