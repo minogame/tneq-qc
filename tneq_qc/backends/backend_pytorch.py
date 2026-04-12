@@ -734,11 +734,11 @@ class BackendPyTorch(ComputeBackend):
         return self.torch.is_complex(tensor)
 
     def abs_square(self, tensor):
-        """Born rule: for complex return |tensor|^2 (real); for real return as-is."""
+        """Return |tensor|^2 for complex tensors and tensor^2 for real tensors."""
         if self.is_complex(tensor):
             r, i = self.torch.real(tensor), self.torch.imag(tensor)
             return r * r + i * i
-        return tensor
+        return tensor * tensor
 
     def gather(self, input, dim, index):
         """Gathers values along an axis specified by dim."""

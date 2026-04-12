@@ -517,10 +517,12 @@ class ComputeBackend(ABC):
 
     def abs_square(self, tensor):
         """
-        Born rule: for complex tensor return |tensor|^2 (real); for real tensor return as-is.
-        Default: return tensor (no-op for real-only backends).
+        Born rule helper: return |tensor|^2.
+
+        For complex tensors this is the usual modulus squared.
+        For real tensors this must be ``tensor ** 2``.
         """
-        return tensor
+        return tensor * tensor
 
     # ------------------------------------------------------------------
     # TNTensor-aware convenience wrappers (Phase-1)

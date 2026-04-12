@@ -64,7 +64,7 @@ def init_model1_from_image(graph: str, image_tensor, backend):
     else:
         img_flat = img_flat[:total]
 
-    core_data = img_flat.reshape(shape).to(dtype=torch.complex64)
+    core_data = img_flat.reshape(shape).to(dtype=backend.default_dtype)
     core_data = core_data / torch.norm(core_data)
     qctn.cores_weights[core_name] = backend.convert_to_tensor(core_data)
     return qctn
