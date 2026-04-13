@@ -1,5 +1,5 @@
 """
-Example script demonstrating QCTN split / merge operations and simple visualization.
+Example script demonstrating QCTN chunk / concat operations and simple visualization.
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ from tneq_qc.core.qctn import QCTN, QCTNHelper
 
 def _adjacency_to_array(adj):
     """
-    Convert QCTN.adjacency_matrix (list-of-ranks per entry) to a numeric array.
+    Convert an adjacency matrix of rank lists to a numeric array.
 
     Each entry (i, j) stores the sum of bond dimensions between cores i and j.
     """
@@ -32,6 +32,29 @@ def _adjacency_to_array(adj):
     return arr
 
 
+def _adjacency_from_table(qctn):
+    """
+    Rebuild an adjacency matrix from ``qctn.adjacency_table``.
+
+    Each matrix entry stores a list of bond dimensions between two cores.
+    """
+    ncores = qctn.ncores
+    adj = np.empty((ncores, ncores), dtype=object)
+    for i in range(ncores):
+        for j in range(ncores):
+            adj[i, j] = []
+
+    for core_info in qctn.adjacency_table:
+        core_idx = core_info["core_idx"]
+        for edge in core_info.get("out_edge_list", []):
+            neighbor_idx = edge["neighbor_idx"]
+            if neighbor_idx >= 0:
+                adj[core_idx, neighbor_idx].append(edge["edge_rank"])
+                adj[neighbor_idx, core_idx].append(edge["edge_rank"])
+
+    return adj
+
+
 def main():
     # ------------------------------------------------------------------
     # 1. 构造一个简单的 MPS 图并创建 QCTN
@@ -47,36 +70,40 @@ def main():
         graph_type=graph_type,
         dim_char=dim_char,
     )
-    print("Original QCTN graph:")
-    print(graph)
-
     qctn = QCTN(graph, backend=backend)
-    print(f"Original QCTN: nqubits = {qctn.nqubits}, ncores = {qctn.ncores}, graph: \n{qctn.tn_graph.to_string()}")
+    print(f"Original QCTN: nqubits = {qctn.nqubits}, ncores = {qctn.ncores}")
+    print(qctn)
+    print(qctn.graph)
 
     # ------------------------------------------------------------------
-    # 2. 对 QCTN 做 split 操作
+    # 2. 对 QCTN 做 chunk 操作
     # ------------------------------------------------------------------
-    left_qctn, right_qctn = qctn.split()
-    print(f"Left  QCTN: nqubits = {left_qctn.nqubits}, ncores = {left_qctn.ncores}, qctn = {left_qctn} graph: \n{left_qctn.graph}")
-    print(f"Right QCTN: nqubits = {right_qctn.nqubits}, ncores = {right_qctn.ncores}, qctn = {right_qctn} graph: \n{right_qctn.graph}")
+    left_qctn, right_qctn = qctn.chunk()
+    print(f"Left  QCTN: nqubits = {left_qctn.nqubits}, ncores = {left_qctn.ncores}")
+    print(left_qctn)
+    print(left_qctn.graph)
+    print(f"Right QCTN: nqubits = {right_qctn.nqubits}, ncores = {right_qctn.ncores}")
+    print(right_qctn)
+    print(right_qctn.graph)
 
     # ------------------------------------------------------------------
-    # 3. 对两个子 QCTN 做 merge 操作
+    # 3. 对两个子 QCTN 做 concat 操作
     # ------------------------------------------------------------------
-    merged_qctn = QCTN.merge(left_qctn, right_qctn)
+    merged_qctn = QCTN.concat([("left", left_qctn), ("right", right_qctn)])
     print(
         f"Merged QCTN: nqubits = {merged_qctn.nqubits}, "
-        f"ncores = {merged_qctn.ncores}"
-        f'graph : \n{merged_qctn.graph}',
+        f"ncores = {merged_qctn.ncores}",
     )
+    print(merged_qctn)
+    print(merged_qctn.graph)
 
     # ------------------------------------------------------------------
     # 5. 可视化：原始 / 子网络 / 合并后 的邻接矩阵
     # ------------------------------------------------------------------
-    adj_orig = _adjacency_to_array(qctn.adjacency_matrix)
-    adj_left = _adjacency_to_array(left_qctn.adjacency_matrix)
-    adj_right = _adjacency_to_array(right_qctn.adjacency_matrix)
-    adj_merged = _adjacency_to_array(merged_qctn.adjacency_matrix)
+    adj_orig = _adjacency_to_array(_adjacency_from_table(qctn))
+    adj_left = _adjacency_to_array(_adjacency_from_table(left_qctn))
+    adj_right = _adjacency_to_array(_adjacency_from_table(right_qctn))
+    adj_merged = _adjacency_to_array(_adjacency_from_table(merged_qctn))
 
     fig, axes = plt.subplots(2, 2, figsize=(8, 8))
     ax00, ax01, ax10, ax11 = axes.flatten()
@@ -105,7 +132,7 @@ def main():
     plt.show()
 
     # ------------------------------------------------------------------
-    # 4. 初始化三种结构的 QCTN (mps / tree / wall)，两两左右 merge
+    # 4. 初始化三种结构的 QCTN (mps / tree / wall)，两两左右 concat
     # ------------------------------------------------------------------
     n_mps, n_tree, n_wall = 5, 5, 4
 
@@ -118,38 +145,44 @@ def main():
     qctn_wall = QCTN(graph_wall, backend=backend)
 
     print("=" * 60)
-    print("Step 4: Three QCTN structures and pairwise left-right merge")
+    print("Step 4: Three QCTN structures and pairwise left-right concat")
     print("=" * 60)
 
     print(f"\n[MPS]  nqubits={qctn_mps.nqubits}, ncores={qctn_mps.ncores}")
-    print(graph_mps)
+    print(qctn_mps)
+    print(qctn_mps.graph)
 
     print(f"\n[Tree] nqubits={qctn_tree.nqubits}, ncores={qctn_tree.ncores}")
-    print(graph_tree)
+    print(qctn_tree)
+    print(qctn_tree.graph)
 
     print(f"\n[Wall] nqubits={qctn_wall.nqubits}, ncores={qctn_wall.ncores}")
-    print(graph_wall)
+    print(qctn_wall)
+    print(qctn_wall.graph)
 
     # ---- MPS + Tree ----
-    merged_mps_tree = QCTN.merge(qctn_mps, qctn_tree)
-    print(f"\n--- Merge(MPS, Tree) ---")
+    merged_mps_tree = QCTN.concat([("mps", qctn_mps), ("tree", qctn_tree)])
+    print(f"\n--- Concat(MPS, Tree) ---")
     print(f"nqubits={merged_mps_tree.nqubits}, ncores={merged_mps_tree.ncores}")
+    print(merged_mps_tree)
     print(merged_mps_tree.graph)
 
     # ---- MPS + Wall ----
-    merged_mps_wall = QCTN.merge(qctn_mps, qctn_wall)
-    print(f"\n--- Merge(MPS, Wall) ---")
+    merged_mps_wall = QCTN.concat([("mps", qctn_mps), ("wall", qctn_wall)])
+    print(f"\n--- Concat(MPS, Wall) ---")
     print(f"nqubits={merged_mps_wall.nqubits}, ncores={merged_mps_wall.ncores}")
+    print(merged_mps_wall)
     print(merged_mps_wall.graph)
 
     # ---- Tree + Wall ----
-    merged_tree_wall = QCTN.merge(qctn_wall, qctn_tree)
-    print(f"\n--- Merge(Wall, Tree) ---")
+    merged_tree_wall = QCTN.concat([("wall", qctn_wall), ("tree", qctn_tree)])
+    print(f"\n--- Concat(Wall, Tree) ---")
     print(f"nqubits={merged_tree_wall.nqubits}, ncores={merged_tree_wall.ncores}")
+    print(merged_tree_wall)
     print(merged_tree_wall.graph)
 
     # ------------------------------------------------------------------
-    # 5. 三种结构 (MPS / Wall-circuit / Tree-mx) 各 5 qubits 按顺序 merge
+    # 5. 三种结构 (MPS / Circuit / Mx) 各 5 qubits 按顺序 concat
     # ------------------------------------------------------------------
     n5 = 5
 
@@ -162,29 +195,34 @@ def main():
     qctn_mx5 = QCTN(graph_mx5, backend=backend)
 
     print("\n" + "=" * 60)
-    print("Step 5: Sequential merge of MPS → Circuit → Mx")
+    print("Step 5: Sequential concat of MPS → Circuit → Mx")
     print("         All 5 qubits")
     print("=" * 60)
 
     print(f"\n[MPS]     nqubits={qctn_mps5.nqubits}, ncores={qctn_mps5.ncores}")
-    print(graph_mps5)
+    print(qctn_mps5)
+    print(qctn_mps5.graph)
 
     print(f"[Circuit] nqubits={qctn_circuit5.nqubits}, ncores={qctn_circuit5.ncores}")
-    print(graph_circuit5)
+    print(qctn_circuit5)
+    print(qctn_circuit5.graph)
 
     print(f"[Mx]      nqubits={qctn_mx5.nqubits}, ncores={qctn_mx5.ncores}")
-    print(graph_mx5)
+    print(qctn_mx5)
+    print(qctn_mx5.graph)
 
-    # Step A: merge MPS + Circuit
-    merged_step1 = QCTN.merge(qctn_circuit5, qctn_mps5)
-    print(f"\n--- Merge(MPS, Circuit) ---")
+    # Step A: concat MPS + Circuit
+    merged_step1 = QCTN.concat([("circuit", qctn_circuit5), ("mps", qctn_mps5)])
+    print(f"\n--- Concat(MPS, Circuit) ---")
     print(f"nqubits={merged_step1.nqubits}, ncores={merged_step1.ncores}")
+    print(merged_step1)
     print(merged_step1.graph)
 
-    # Step B: merge (MPS+Circuit) + Mx
-    merged_step2 = QCTN.merge(merged_step1, qctn_mx5)
-    print(f"\n--- Merge(MPS+Circuit, Mx) ---")
+    # Step B: concat (MPS+Circuit) + Mx
+    merged_step2 = QCTN.concat([merged_step1, ("mx", qctn_mx5)])
+    print(f"\n--- Concat(MPS+Circuit, Mx) ---")
     print(f"nqubits={merged_step2.nqubits}, ncores={merged_step2.ncores}")
+    print(merged_step2)
     print(merged_step2.graph)
 
 
@@ -193,4 +231,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
