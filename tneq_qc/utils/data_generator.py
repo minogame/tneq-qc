@@ -1,15 +1,25 @@
 """
-Hermite-polynomial data generation utilities.
+Data generation utilities for measurement matrices (Mx).
 
-Provides :class:`DataGenerator` for computing feature maps φ(x) and
-measurement matrices Mx = φ(x) ⊗ φ(x)† from raw continuous inputs.
+Provides:
+
+- :class:`DataGenerator` — Hermite-polynomial basis: φ(x) → Mx = φφ†.
+- :class:`CustomDataGenerator` — user-provided generation function.
+
+Both share the same ``.generate(x, K, ret_type)`` interface and work
+seamlessly with :func:`make_data_fn` and :meth:`EngineCommon.sample`.
 
 Typical usage::
 
-    from tneq_qc.utils.data_generator import DataGenerator
+    from tneq_qc.utils.data_generator import DataGenerator, CustomDataGenerator
 
+    # Hermite basis (default)
     gen = DataGenerator(backend, mx_K=16)
     Mx_list, phi_x = gen.generate(x, K=8)
+
+    # User-defined Mx (e.g. discrete distribution)
+    custom_gen = CustomDataGenerator(backend, my_generate_fn, mx_K=4)
+    Mx_list, _ = custom_gen.generate(x, K=4)
 """
 
 from __future__ import annotations
@@ -248,32 +258,111 @@ class DataGenerator:
         return Mx_list, out
 
 
+class CustomDataGenerator:
+    """Wrap a user-provided Mx generation function.
+
+    The wrapped function must accept ``(x_tensor, K, backend)`` and return
+    ``(Mx_list, phi_x_or_None)`` where:
+
+    - ``Mx_list`` is a list of *D* tensors, each of shape ``[B, K, K]``.
+    - ``phi_x`` is an optional feature map (may be ``None``).
+
+    The resulting object exposes the same ``.generate()`` interface as
+    :class:`DataGenerator`, so it works with :func:`make_data_fn` and
+    :meth:`EngineCommon.sample` without changes.
+
+    Args:
+        backend: Compute backend instance.
+        generate_fn: ``(x_tensor, K, backend) -> (Mx_list, phi_x | None)``.
+        mx_K (int): Default *K* when ``generate(K=None)`` is called.
+
+    Example — discrete class labels::
+
+        import torch
+
+        # Pre-build a look-up table of Mx matrices (one per class).
+        num_classes, phys_dim = 10, 4
+        mx_table = torch.zeros(num_classes, phys_dim, phys_dim)
+        for k in range(num_classes):
+            mx_table[k, k % phys_dim, k % phys_dim] = 1.0
+
+        def discrete_generate_fn(x, K, backend):
+            x_np = backend.tensor_to_numpy(x).astype(int)
+            B, D = x_np.shape
+            Mx_list = []
+            for d in range(D):
+                mx = mx_table[x_np[:, d]]          # [B, K, K]
+                Mx_list.append(backend.convert_to_tensor(mx))
+            return Mx_list, None
+
+        gen = CustomDataGenerator(backend, discrete_generate_fn, mx_K=phys_dim)
+    """
+
+    def __init__(self, backend, generate_fn, mx_K: int = 2):
+        self.backend = backend
+        self._generate_fn = generate_fn
+        self.mx_K = mx_K
+
+    def generate(self, x, K: Optional[int] = None, ret_type: str = 'tensor'):
+        """Generate Mx matrices via the user-provided function.
+
+        Args:
+            x: Input batch (any type accepted by the backend).
+            K (int, optional): Passed through to *generate_fn*.
+                Defaults to ``self.mx_K``.
+            ret_type (str): ``'tensor'`` or ``'TNTensor'``.
+
+        Returns:
+            tuple: ``(Mx_list, phi_x)`` — same contract as
+            :meth:`DataGenerator.generate`.
+        """
+        from ..core.tn_tensor import TNTensor
+
+        if K is None:
+            K = self.mx_K
+
+        x = self.backend.convert_to_tensor(x)
+        Mx_list, phi_x = self._generate_fn(x, K, self.backend)
+
+        if ret_type == 'TNTensor':
+            wrapped = []
+            for m in Mx_list:
+                wrapped.append(TNTensor(m, has_batch=True))
+            Mx_list = wrapped
+
+        return Mx_list, phi_x
+
+
 # ---------------------------------------------------------------------------
 # Factory helper for Trainer.fit(data_fn=...) (Phase 3.0)
 # ---------------------------------------------------------------------------
 
 def make_data_fn(
-    data_generator: DataGenerator,
+    data_generator,
     qctn,
     mx_core_names=None,
     batch_size: int = 128,
     num_qubits: int = None,
     K: int = 2,
+    sample_fn=None,
 ):
     """Create a *data_fn* callable for :meth:`Trainer.fit`.
 
-    Each call generates a random batch, computes Hermite Mx matrices via
+    Each call generates a random batch, computes Mx matrices via
     *data_generator*, and writes them into *qctn* in-place.
 
     Args:
-        data_generator: :class:`DataGenerator` instance.
+        data_generator: :class:`DataGenerator` or :class:`CustomDataGenerator`.
         qctn: QCTN whose mx cores will be updated.
         mx_core_names: Readable names of the mx cores to update.
             If None, auto-detected by finding cores whose readable
             name starts with ``'mx.'``.
         batch_size: Number of samples per step.
         num_qubits: Data dimensionality (D). If None, uses ``qctn.nqubits``.
-        K: Hermite polynomial order.
+        K: Polynomial order (passed through to ``data_generator.generate``).
+        sample_fn: Optional callable ``(batch_size, num_qubits) -> x``
+            that returns input samples. Defaults to
+            ``np.random.uniform(-1, 1, (batch_size, num_qubits))``.
 
     Returns:
         Callable ``(step: int) -> None`` suitable for ``Trainer.fit(data_fn=...)``.
@@ -288,13 +377,17 @@ def make_data_fn(
     if num_qubits is None:
         num_qubits = qctn.nqubits
 
+    _default_sample = sample_fn is None
+
     def data_fn(step: int) -> None:
-        x = np.random.uniform(-1.0, 1.0, size=(batch_size, num_qubits)).astype(
-            np.float32
-        )
+        if _default_sample:
+            x = np.random.uniform(-1.0, 1.0, size=(batch_size, num_qubits)).astype(
+                np.float32
+            )
+        else:
+            x = sample_fn(batch_size, num_qubits)
         Mx_list, _ = data_generator.generate(x, K=K, ret_type="TNTensor")
         for i, name in enumerate(mx_core_names):
             qctn[name] = Mx_list[i]
 
     return data_fn
-

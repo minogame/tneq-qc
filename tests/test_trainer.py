@@ -9,6 +9,7 @@ Covers:
 - make_data_fn factory
 """
 
+import numpy as np
 import pytest
 import torch
 
@@ -403,3 +404,116 @@ class TestMakeDataFn:
         for name in mx_names:
             core = combined[name]
             assert core.has_batch is True
+
+    def test_factory_uses_sample_fn(self, backend):
+        from tneq_qc.utils.data_generator import DataGenerator, make_data_fn
+
+        graph_mps = QCTNHelper.mps(2, bond_dim=2, phys_dim=2)
+        graph_mx = QCTNHelper.measure_matrix(2, phys_dim=2)
+        mps = QCTN(graph_mps, backend=backend).auto_init()
+        mx = QCTN(graph_mx, backend=backend).auto_init()
+        combined = QCTN.concat([('mps', mps), ('mx', mx)])
+
+        captured = {}
+        sample = np.array(
+            [
+                [0.25, -0.50],
+                [0.75, 0.10],
+                [-0.20, 0.30],
+            ],
+            dtype=np.float32,
+        )
+
+        def sample_fn(batch_size, num_qubits):
+            captured['sample_args'] = (batch_size, num_qubits)
+            return sample.copy()
+
+        data_gen = DataGenerator(backend, mx_K=2)
+        original_generate = data_gen.generate
+
+        def wrapped_generate(x, *args, **kwargs):
+            captured['x_seen'] = backend.tensor_to_numpy(x).copy()
+            return original_generate(x, *args, **kwargs)
+
+        data_gen.generate = wrapped_generate
+
+        fn = make_data_fn(
+            data_gen,
+            combined,
+            batch_size=sample.shape[0],
+            num_qubits=sample.shape[1],
+            K=2,
+            sample_fn=sample_fn,
+        )
+
+        fn(1)
+
+        assert captured['sample_args'] == (3, 2)
+        assert np.allclose(captured['x_seen'], sample)
+
+    def test_factory_supports_custom_data_generator(self, backend):
+        from tneq_qc.utils.data_generator import CustomDataGenerator, make_data_fn
+
+        phys_dim = 3
+        graph_mps = QCTNHelper.mps(2, bond_dim=2, phys_dim=phys_dim)
+        graph_mx = QCTNHelper.measure_matrix(2, phys_dim=phys_dim)
+        mps = QCTN(graph_mps, backend=backend).auto_init()
+        mx = QCTN(graph_mx, backend=backend).auto_init()
+        combined = QCTN.concat([('mps', mps), ('mx', mx)])
+
+        mx_table = np.zeros((phys_dim, phys_dim, phys_dim), dtype=np.float32)
+        for k in range(phys_dim):
+            mx_table[k, k, k] = 1.0
+
+        def generate_fn(x, K, backend):
+            x_np = np.asarray(backend.tensor_to_numpy(x).real, dtype=np.int64)
+            mx_list = []
+            for d in range(x_np.shape[1]):
+                mx_list.append(backend.convert_to_tensor(mx_table[x_np[:, d]]))
+            return mx_list, None
+
+        def sample_fn(batch_size, num_qubits):
+            assert batch_size == 4
+            assert num_qubits == 2
+            return np.array(
+                [
+                    [0, 1],
+                    [1, 2],
+                    [2, 0],
+                    [1, 1],
+                ],
+                dtype=np.int64,
+            )
+
+        data_gen = CustomDataGenerator(backend, generate_fn, mx_K=phys_dim)
+        fn = make_data_fn(
+            data_gen,
+            combined,
+            batch_size=4,
+            num_qubits=2,
+            K=phys_dim,
+            sample_fn=sample_fn,
+        )
+
+        fn(1)
+
+        mx_names = [
+            combined.core_names[sym]
+            for sym in combined.cores
+            if combined.core_names[sym].startswith('mx.')
+        ]
+        assert len(mx_names) == 2
+
+        first_core = combined[mx_names[0]]
+        second_core = combined[mx_names[1]]
+        first_raw = first_core.tensor if isinstance(first_core, TNTensor) else first_core
+        second_raw = second_core.tensor if isinstance(second_core, TNTensor) else second_core
+
+        assert first_core.has_batch is True
+        assert second_core.has_batch is True
+        assert tuple(first_raw.shape) == (4, phys_dim, phys_dim)
+        assert tuple(second_raw.shape) == (4, phys_dim, phys_dim)
+        assert torch.allclose(first_raw[0], torch.tensor(mx_table[0]))
+        assert torch.allclose(first_raw[2], torch.tensor(mx_table[2]))
+        assert torch.allclose(second_raw[0], torch.tensor(mx_table[1]))
+        assert torch.allclose(second_raw[1], torch.tensor(mx_table[2]))

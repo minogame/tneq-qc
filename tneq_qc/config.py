@@ -67,4 +67,4 @@ class EvolutionProperty:
 class OverlordProperty:
     tik = 1
 
-print(AgentBehavier.__dict__)
+# print(AgentBehavier.__dict__)

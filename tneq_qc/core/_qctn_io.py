@@ -4,6 +4,7 @@ Contains all methods related to core tensor initialization, loading,
 saving, and injection from external sources.
 """
 import warnings
+import json
 import numpy as np
 from pathlib import Path
 from typing import Union, Optional, Mapping
@@ -253,8 +254,16 @@ class QCTNIOMixin:
         # Persist core_names mapping so load_cores can restore it.
         core_names = getattr(self, 'core_names', {})
         if core_names:
-            import json
             metadata_dict['_core_names'] = json.dumps(core_names)
+
+        # Persist per-core batch flags. This is required to correctly
+        # reconstruct batched mx / teacher cores after reload.
+        core_has_batch = {}
+        for core_name, tensor in self.cores_weights.items():
+            if isinstance(tensor, TNTensor):
+                core_has_batch[core_name] = bool(tensor.has_batch)
+        if core_has_batch:
+            metadata_dict['_core_has_batch'] = json.dumps(core_has_batch)
 
         save_file(tensor_dict, str(file_path), metadata=metadata_dict)
 
@@ -283,6 +292,13 @@ class QCTNIOMixin:
         except Exception:
             pass
 
+        saved_has_batch = {}
+        if '_core_has_batch' in metadata:
+            try:
+                saved_has_batch = json.loads(metadata['_core_has_batch'])
+            except Exception:
+                saved_has_batch = {}
+
         for core_name in self.cores:
             key = f"core_{core_name}"
             key_real, key_imag = f"core_{core_name}_real", f"core_{core_name}_imag"
@@ -300,6 +316,11 @@ class QCTNIOMixin:
             else:
                 tn_tensor = TNTensor(tensor)
             tn_tensor.auto_scale()
+            if core_name in self.cores_weights and isinstance(self.cores_weights[core_name], TNTensor):
+                default_has_batch = self.cores_weights[core_name].has_batch
+            else:
+                default_has_batch = False
+            tn_tensor.has_batch = bool(saved_has_batch.get(core_name, default_has_batch))
             self.cores_weights[core_name] = tn_tensor
 
         metadata_dict = {str(k): str(v) for k, v in metadata.items()}
@@ -307,7 +328,6 @@ class QCTNIOMixin:
 
         # Restore core_names if saved.
         if '_core_names' in metadata_dict:
-            import json
             saved_names = json.loads(metadata_dict['_core_names'])
             # Only restore names for cores that exist in this instance.
             for sym in self.cores:
