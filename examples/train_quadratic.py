@@ -263,6 +263,27 @@ def main():
     plt.close()
     print(f"  Loss curve saved: {loss_path}")
 
+    # 4. Reload validation
+    print("\n=== Reload Validation ===")
+    model_val = Quadratic(nqubits=N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM,
+                          backend=backend).auto_init()
+    init_circuit_01(model_val._submodules['circuit'], backend)
+    model_val._submodules['mps'].load_cores(save_path)
+    combined_val = model_val.build()
+
+    # Inject same identity mx and compare contraction result
+    ident = TNTensor(backend.eye(PHYS_DIM))
+    for name in mx_core_names:
+        combined[name] = ident
+        combined_val[name] = ident
+
+    r_orig = engine.contract(combined)
+    r_load = engine.contract(combined_val)
+    r_orig_np = backend.tensor_to_numpy(r_orig)
+    r_load_np = backend.tensor_to_numpy(r_load)
+    reload_err = np.max(np.abs(r_orig_np - r_load_np))
+    print(f"  Max reload error: {reload_err:.2e}")
+
 
 if __name__ == "__main__":
     main()

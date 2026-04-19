@@ -281,6 +281,37 @@ def main():
     })
     print(f"Model saved: {save_path}")
 
+    # Reload validation
+    print("\n=== Reload Validation ===")
+    custom_tn_val = QCTN(tn_graph, backend=backend).auto_init()
+    custom_tn_val.load_cores(save_path)
+    tn_hermit_val = custom_tn_val.hermit()
+    combined_val = QCTN.concat([
+        ('cs',   circuit),
+        ('tn',   custom_tn_val),
+        ('mx',   mx),
+        ('tn_h', tn_hermit_val),
+        ('cs_t', circuit_bra),
+    ])
+
+    from tneq_qc.core.tn_tensor import TNTensor
+    ident = TNTensor(backend.eye(PHYS_DIM))
+    mx_names_val = [
+        combined_val.core_names[sym] for sym in combined_val.cores
+        if combined_val.core_names.get(sym, '').startswith('mx.')
+    ]
+    for name in mx_core_names:
+        combined[name] = ident
+    for name in mx_names_val:
+        combined_val[name] = ident
+
+    r_orig = engine.contract(combined)
+    r_load = engine.contract(combined_val)
+    r_orig_np = backend.tensor_to_numpy(r_orig)
+    r_load_np = backend.tensor_to_numpy(r_load)
+    reload_err = np.max(np.abs(r_orig_np - r_load_np))
+    print(f"  Max reload error: {reload_err:.2e}")
+
 
 if __name__ == "__main__":
     main()

@@ -509,7 +509,12 @@ class BackendPyTorch(ComputeBackend):
             tensor = tensor.tensor
         if not isinstance(tensor, self.torch.Tensor):
             tensor = self.torch.as_tensor(tensor)
-        return tensor.detach().cpu().numpy()
+        t = tensor.detach().cpu()
+        if t.is_conj():
+            t = t.resolve_conj()
+        if t.is_neg():
+            t = t.resolve_neg()
+        return t.contiguous().numpy()
 
     def reshape(self, tensor, shape):
         """Reshape tensor to the given shape."""

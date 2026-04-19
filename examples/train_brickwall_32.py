@@ -59,7 +59,6 @@ def make_correlated_gaussian_sampler(ndim):
 
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-    # backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
     engine  = EngineCommon(backend=backend, strategy_mode='full')
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
@@ -72,8 +71,6 @@ def main():
 
     # 2) Brickwall (trainable)
     bw_graph = QCTNHelper.brickwall(N_QUBITS, n_layers=N_LAYERS, phys_dim=PHYS_DIM)
-    # bw_graph = QCTNHelper.mps(N_QUBITS, n_layers=N_LAYERS, phys_dim=PHYS_DIM)
-    # bw_graph = QCTNHelper.mps(N_QUBITS, bond_dim=PHYS_DIM, phys_dim=PHYS_DIM)
     brickwall = QCTN(bw_graph, backend=backend).auto_init()
     
     for name in brickwall.core_names:
@@ -232,17 +229,15 @@ def main():
     for name in mx_names:
         combined[name] = ident
 
-    # samples = engine.sample(
-    #     combined, data_gen, mx_names,
-    #     num_samples=NUM_SAMPLES,
-    #     bounds=SAMPLE_BOUNDS,
-    #     grid_size=SAMPLE_GRID,
-    # )
-    # samples_np = samples.cpu().numpy()
-    # print(f"  samples shape: {samples.shape}")
-    # print(f"  range: [{samples.min():.2f}, {samples.max():.2f}]")
-    # print(f"  mean:  {samples.mean(0).tolist()}")
-    # print(f"  std:   {samples.std(0).tolist()}")
+    samples = engine.sample(
+        combined, data_gen, mx_names,
+        num_samples=NUM_SAMPLES,
+        bounds=SAMPLE_BOUNDS,
+        grid_size=SAMPLE_GRID,
+    )
+    samples_np = samples.cpu().numpy()
+    print(f"  samples shape: {samples.shape}")
+    print(f"  range: [{samples.min():.2f}, {samples.max():.2f}]")
 
     # ------------------------------------------------------------------
     # 5. Plot
@@ -266,10 +261,10 @@ def main():
         heatmap.T, origin='lower', cmap='hot', interpolation='bilinear',
         extent=[lo, hi, lo, hi], aspect='equal', alpha=0.6,
     )
-    # ax.scatter(
-    #     samples_np[:, 0], samples_np[:, 1],
-    #     s=4, c='cyan', alpha=0.5, edgecolors='none',
-    # )
+    ax.scatter(
+        samples_np[:, 0], samples_np[:, 1],
+        s=4, c='cyan', alpha=0.5, edgecolors='none',
+    )
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
     ax.set_title(f"Samples (N={NUM_SAMPLES}) on heatmap")
@@ -280,6 +275,34 @@ def main():
     out_path = os.path.join(OUTPUT_DIR, "quadratic_heatmap_samples.png")
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
+
+    # Reload validation
+    print("\n=== Reload Validation ===")
+    bw_val = QCTN(bw_graph, backend=backend).auto_init()
+    bw_val.load_cores(save_path)
+    bw_hermit_val = bw_val.hermit()
+    combined_val = QCTN.concat([
+        ('cs',   circuit),
+        ('bw',   bw_val),
+        ('mx',   mx),
+        ('bw_h', bw_hermit_val),
+        ('cs_t', circuit_bra),
+    ])
+    mx_names_val = [
+        combined_val.core_names[sym] for sym in combined_val.cores
+        if combined_val.core_names[sym].startswith('mx.')
+    ]
+    for name in mx_names_val:
+        combined_val[name] = ident
+    for name in mx_names:
+        combined[name] = ident
+
+    r_orig = engine.contract(combined)
+    r_load = engine.contract(combined_val)
+    r_orig_np = backend.tensor_to_numpy(r_orig)
+    r_load_np = backend.tensor_to_numpy(r_load)
+    reload_err = np.max(np.abs(r_orig_np - r_load_np))
+    print(f"  Max reload error: {reload_err:.2e}")
 
 if __name__ == "__main__":
     main()
