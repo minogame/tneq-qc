@@ -106,25 +106,15 @@ def generate_mps_brickwall_graph(total_qubits, block_qubits, overlap=3, phys_dim
 # Training
 # =====================================================================
 
-TOTAL_QUBITS = 49
+TOTAL_QUBITS = int(os.environ.get('TOTAL_QUBITS', '49'))
 BLOCK_QUBITS = 7
 OVERLAP      = 1
-PHYS_DIM     = 8
-BATCH_SIZE   = 1024
-N_STEPS      = 500
+PHYS_DIM     = int(os.environ.get('PHYS_DIM', '8'))
+BATCH_SIZE   = int(os.environ.get('BATCH_SIZE', '1024'))
+N_STEPS      = int(os.environ.get('N_STEPS', '10'))
 LR           = 0.01
-LOG_EVERY    = 2
+LOG_EVERY    = 1
 SAVE_DIR     = "checkpoints"
-
-# TOTAL_QUBITS = 13
-# BLOCK_QUBITS = 7
-# OVERLAP      = 1
-# PHYS_DIM     = 2
-# BATCH_SIZE   = 1024
-# N_STEPS      = 500
-# LR           = 0.01
-# LOG_EVERY    = 10
-# SAVE_DIR     = "checkpoints"
 
 def main():
     # --- Distributed setup ---
@@ -146,7 +136,6 @@ def main():
     # --- Generate custom TN graph ---
     tn_graph, actual_qubits = generate_mps_brickwall_graph(
         TOTAL_QUBITS, BLOCK_QUBITS, OVERLAP, PHYS_DIM)
-    print(f"tn_graph: {tn_graph}")
 
     stride = BLOCK_QUBITS - OVERLAP
     n_blocks = 1 + math.ceil(max(0, TOTAL_QUBITS - BLOCK_QUBITS) / stride)
@@ -181,7 +170,6 @@ def main():
     if rank == 0:
         print(f"Init time: {t_init:.1f}s")
         print(f"Combined: {combined.ncores} cores, {len(combined.parameters())} trainable")
-        print(f"combined: {combined}")
 
     # --- Build qubit-based partition (minimize cross-partition edges) ---
     # Group cores by segment prefix
@@ -205,59 +193,128 @@ def main():
         elif name.startswith('mx.'):
             mx_cores_list.append((sym, mx_i)); mx_i += 1
 
-    p0, p1 = [], []
+    # --- N-way qubit-aligned partition ---
+    # Build a mapping: tn core index → set of qubits it touches
+    tn_core_qubits = {}
+    for entry in custom_tn.adjacency_table:
+        cn = entry['core_name']
+        ci = custom_tn.cores.index(cn) if cn in custom_tn.cores else -1
+        if ci >= 0:
+            qs = set()
+            for d in ['in_edge_list', 'out_edge_list']:
+                for e in entry.get(d, []):
+                    qi = e.get('qubit_idx', -1)
+                    if qi >= 0:
+                        qs.add(qi)
+            tn_core_qubits[ci] = qs
 
-    # tn: first 24 cores → P0, last 24 → P1
-    tn_split = custom_tn.ncores // 2
-    qb_split = actual_qubits // 2
-    print(f"tn_split: {tn_split}  qb_split: {qb_split}")
+    n_tn = custom_tn.ncores
+    # Split tn cores into world_size roughly equal chunks
+    chunk = n_tn // world_size
+    tn_splits = []  # (start_idx, end_idx) per partition
+    for p in range(world_size):
+        s = p * chunk
+        e = (p + 1) * chunk if p < world_size - 1 else n_tn
+        tn_splits.append((s, e))
 
-    for sym, idx in tn_cores:
-        (p0 if idx < tn_split else p1).append(sym)
-
-    # tn_h: same partition as the corresponding tn core
-    for sym, idx in tn_h_cores:
-        (p0 if idx < tn_split else p1).append(sym)
-
-    # cs: qubits 0-24 → P0, qubits 25-48 → P1
-    for sym, qi in cs_cores:
-        (p0 if qi <= qb_split else p1).append(sym)
-
-    # cs_t: same rule as cs
-    for sym, qi in cs_t_cores:
-        (p0 if qi <= qb_split else p1).append(sym)
-
-    # mx: qubits 0-23 → P0, qubits 24-48 → P1
-    for sym, qi in mx_cores_list:
-        (p0 if qi <= qb_split-1 else p1).append(sym)
-
-    partitions = [p0, p1]
+    # Determine qubit range covered by each partition's tn cores
+    partition_qubit_ranges = []  # (min_qubit, max_qubit) per partition
+    for s, e in tn_splits:
+        qs = set()
+        for ci in range(s, e):
+            qs.update(tn_core_qubits.get(ci, set()))
+        partition_qubit_ranges.append((min(qs), max(qs)))
 
     if rank == 0:
-        print(f"\nQubit-based partition: P0={len(p0)} cores, P1={len(p1)} cores")
-        print(f"  p0: {p0}")
-        print(f"  p1: {p1}")
-        print(f"  tn split at core {tn_split} (of {custom_tn.ncores})")
+        for p, ((s, e), (qmin, qmax)) in enumerate(zip(tn_splits, partition_qubit_ranges)):
+            print(f"  P{p}: tn cores [{s},{e})  qubits {qmin}-{qmax}")
 
-    # --- Distributed engine ---
-    comm = get_comm_backend(
-        backend='torch' if world_size > 1 else 'auto',
-        rank=rank, world_size=world_size,
-    )
-    engine = EngineDistributed(
-        backend=backend,
-        strategy_mode='full',
-        comm=comm,
-        partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
-    )
-    engine.init_distributed(combined, partitions=partitions)
+    # Assign each core to a partition
+    partitions = [[] for _ in range(world_size)]
 
-    # --- Reverse qubit contraction order for the second half of partitions ---
-    if world_size >= 2 and rank >= world_size // 2:
-        combined.qubit_indices = list(reversed(combined.qubit_indices))
+    for sym, idx in tn_cores:
+        for p, (s, e) in enumerate(tn_splits):
+            if s <= idx < e:
+                partitions[p].append(sym)
+                break
 
+    for sym, idx in tn_h_cores:
+        for p, (s, e) in enumerate(tn_splits):
+            if s <= idx < e:
+                partitions[p].append(sym)
+                break
+
+    # cs, mx, cs_t: assign by qubit to the partition whose range covers it.
+    # If a qubit is in multiple partitions' ranges (overlap), pick the lower one.
+    def qubit_to_partition(qi):
+        for p, (qmin, qmax) in enumerate(partition_qubit_ranges):
+            if qmin <= qi <= qmax:
+                return p
+        return world_size - 1  # fallback: last partition
+
+    for sym, qi in cs_cores:
+        partitions[qubit_to_partition(qi)].append(sym)
+    for sym, qi in cs_t_cores:
+        partitions[qubit_to_partition(qi)].append(sym)
+    for sym, qi in mx_cores_list:
+        partitions[qubit_to_partition(qi)].append(sym)
+
+    if rank == 0:
+        for p in range(world_size):
+            print(f"  P{p}: {len(partitions[p])} cores")
+        # Count cross-partition edges
+        core_to_part = {}
+        for p, cores in enumerate(partitions):
+            for sym in cores:
+                core_to_part[sym] = p
+        cross_edges = 0
+        for entry in combined.adjacency_table:
+            core_sym = entry['core_name']
+            cp = core_to_part.get(core_sym, -1)
+            for edge in entry.get('in_edge_list', []) + entry.get('out_edge_list', []):
+                neighbor = edge.get('neighbor_name', '')
+                np_ = core_to_part.get(neighbor, -1)
+                if neighbor and cp >= 0 and np_ >= 0 and cp != np_:
+                    cross_edges += 1
+        print(f"  Cross-partition edges (all directions): {cross_edges}")
+
+    # --- Engine setup ---
     if world_size > 1:
+        comm = get_comm_backend(
+            backend='torch', rank=rank, world_size=world_size,
+        )
+        engine = EngineDistributed(
+            backend=backend,
+            strategy_mode='full',
+            comm=comm,
+            partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
+        )
+        engine.init_distributed(combined, partitions=partitions)
+
+        # Reverse qubit contraction order for the second half of partitions
+        if rank >= world_size // 2:
+            combined.qubit_indices = list(reversed(combined.qubit_indices))
+
+        # Free non-local cores to reduce per-rank memory
+        local_core_set = set(partitions[rank])
+        freed = 0
+        for sym in list(combined.cores_weights.keys()):
+            if sym not in local_core_set:
+                combined.cores_weights[sym] = None
+                freed += 1
+        if rank == 0:
+            print(f"  Freed {freed} non-local cores from combined")
+
         dist.barrier()
+
+        local_params = engine._local_qctn.parameters() if engine._local_qctn else []
+    else:
+        from tneq_qc import EngineCommon
+        engine = EngineCommon(backend=backend, strategy_mode='full')
+        local_params = combined.parameters()
+
+    if rank == 0:
+        print(f"  trainable params: {len(local_params)}")
 
     # --- Data function ---
     names_map = combined.core_names
@@ -265,20 +322,28 @@ def main():
         names_map[sym] for sym in combined.cores
         if names_map.get(sym, '').startswith('mx.')
     ]
+    # In distributed mode, only inject mx cores belonging to this rank's partition
+    if world_size > 1:
+        local_mx_indices = []
+        for i, name in enumerate(mx_core_names):
+            sym = [s for s, n in names_map.items() if n == name][0]
+            if sym in local_core_set:
+                local_mx_indices.append(i)
 
     def data_fn(step):
         x = np.random.randn(BATCH_SIZE, actual_qubits).astype(np.float32)
         Mx_list, _ = data_gen.generate(x, K=PHYS_DIM, ret_type='TNTensor')
-        for i, name in enumerate(mx_core_names):
-            combined[name] = Mx_list[i]
+        if world_size > 1:
+            for i in local_mx_indices:
+                combined[mx_core_names[i]] = Mx_list[i]
+        else:
+            for i, name in enumerate(mx_core_names):
+                combined[name] = Mx_list[i]
 
     # --- Train ---
-    # Optimizer only covers local partition's parameters
-    local_params = engine._local_qctn.parameters() if engine._local_qctn else []
-    print(f"local_params: {len(local_params)}")
-    # exit()
-    optimizer = create_optimizer("sgdg", local_params, backend=backend, lr=LR / world_size)
+    optimizer = create_optimizer("sgdg", local_params, backend=backend, lr=LR / max(world_size, 1))
     loss_history = []
+    step_times = []
 
     if rank == 0:
         print(f"\nTraining: {N_STEPS} steps, batch={BATCH_SIZE}, lr={LR}")
@@ -291,16 +356,17 @@ def main():
 
         if world_size > 1:
             dist.barrier()
-
-        loss_val, grads = engine.contract_distributed_with_gradient(target=1, loss='nll')
-        optimizer.step(grads)
-
-        if world_size > 1:
+            loss_val, grads = engine.contract_distributed_with_gradient(target=1, loss='nll')
+            optimizer.step(grads)
             dist.barrier()
+        else:
+            loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
+            optimizer.step(list(grads))
 
         t_step = time.time() - t0
         lv = float(loss_val)
         loss_history.append(lv)
+        step_times.append(t_step)
 
         if rank == 0 and (step % LOG_EVERY == 0 or step == 1):
             print(f"  Step {step:4d}/{N_STEPS}  loss={lv:.6f}  ({t_step:.2f}s)")
@@ -308,9 +374,32 @@ def main():
     if world_size > 1:
         dist.barrier()
 
+    # Report peak memory per rank
+    def _peak_rss_mb():
+        """Read VmHWM (RSS high water mark) from /proc — actual physical memory peak."""
+        try:
+            with open('/proc/self/status') as f:
+                for line in f:
+                    if line.startswith('VmHWM:'):
+                        return int(line.split()[1]) / 1024  # kB → MB
+        except Exception:
+            pass
+        return 0.0
+
+    my_peak = _peak_rss_mb()
+    print(f"  [Rank {rank}] Peak RSS: {my_peak:.0f} MB")
+
+    if world_size > 1:
+        dist.barrier()
+
     if rank == 0:
+        # Step time stats (skip first 2 warmup steps)
+        warm = step_times[2:] if len(step_times) > 2 else step_times
+        avg_t = np.mean(warm) if warm else 0
+        std_t = np.std(warm) if warm else 0
         print(f"\nDone. Initial={loss_history[0]:.6f}  Final={loss_history[-1]:.6f}  "
               f"Reduced={loss_history[0] - loss_history[-1]:.6f}")
+        print(f"  Avg step time (skip first 2): {avg_t:.3f} ± {std_t:.3f} s")
 
         # Save model (rank 0 only)
         os.makedirs(SAVE_DIR, exist_ok=True)

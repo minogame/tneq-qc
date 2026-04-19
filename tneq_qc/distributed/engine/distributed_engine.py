@@ -862,7 +862,8 @@ class EngineDistributed(EngineCommon):
 
         einsum_eq = f"{my_part},{partner_part}->{batch_sym}"
 
-        local_print(f"[Rank {self.rank}] Reduce einsum: {einsum_eq}")
+        local_print(f"[Rank {self.rank}] Reduce einsum: {einsum_eq}"
+                     f"  shapes: {local_tensor.shape} x {partner_tensor.shape}")
 
         result = torch.einsum(einsum_eq, local_tensor, partner_tensor)
 
