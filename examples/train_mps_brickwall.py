@@ -174,6 +174,38 @@ LOG_EVERY    = 10
 SAVE_DIR     = "checkpoints"
 
 
+def init_circuit_01(qctn: QCTN, backend) -> QCTN:
+    """Fill each circuit core with an alternating 0/1 pattern."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        shape = tuple(core_info['input_shape'] + core_info['output_shape'])
+        n = 1
+        for d in shape:
+            n *= d
+        flat = torch.zeros(n, dtype=backend.default_dtype)
+        for i in range(n):
+            flat[i] = float(i % 2)
+        qctn.cores_weights[core_name] = backend.convert_to_tensor(flat.reshape(shape))
+    return qctn
+
+
+def init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Fill each measure core with an identity matrix placeholder."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        qctn.cores_weights[core_name] = backend.reshape(core, input_shape + output_shape)
+    return qctn
+
+
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
     engine  = EngineCommon(backend=backend, strategy_mode='full')
@@ -198,17 +230,18 @@ def main():
     t0 = time.time()
 
     # 1) Custom TN (trainable)
-    custom_tn = QCTN(tn_graph, backend=backend).auto_init()
+    custom_tn = QCTN(tn_graph, backend=backend).auto_init(orthogonal=True)
     custom_tn.requires_grad_(True)
 
     # print('custom_tn', len(custom_tn.cores))
     # exit()
 
     # 2) CircuitState (ket)
-    circuit = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init()
+    circuit = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init(orthogonal=False)
+    circuit = init_circuit_01(circuit, backend)
 
     # 3) MeasureMatrix (data injection)
-    mx = MeasureMatrix(actual_qubits, PHYS_DIM, backend).auto_init()
+    mx = init_measure_identity(MeasureMatrix(actual_qubits, PHYS_DIM, backend), backend)
 
     # 4) Hermitian conjugate
     tn_hermit = custom_tn.hermit()
@@ -283,7 +316,7 @@ def main():
 
     # Reload validation
     print("\n=== Reload Validation ===")
-    custom_tn_val = QCTN(tn_graph, backend=backend).auto_init()
+    custom_tn_val = QCTN(tn_graph, backend=backend)
     custom_tn_val.load_cores(save_path)
     tn_hermit_val = custom_tn_val.hermit()
     combined_val = QCTN.concat([

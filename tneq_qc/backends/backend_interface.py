@@ -203,16 +203,23 @@ class ComputeBackend(ABC):
         self.backend_info = backend_info
 
     @abstractmethod
-    def init_random_core(self, shape, distribution: str = "gaussian"):
+    def init_random_core(
+        self,
+        shape,
+        distribution: str = "gaussian",
+        orthogonal: bool = True,
+    ):
         """
-        Initialize a random core tensor (orthogonal initialization).
+        Initialize a random core tensor.
         
         Args:
             shape: Shape of the tensor.
-            distribution: Random matrix distribution used before QR-based
-                orthogonalization. Supported values are backend-defined;
-                the framework uses ``"gaussian"`` by default and may also
-                support ``"uniform"``.
+            distribution: Random distribution used to sample the core.
+                Supported values are backend-defined; the framework uses
+                ``"gaussian"`` by default and may also support ``"uniform"``.
+            orthogonal: When ``True`` (default), apply the backend's
+                orthogonal / unitary-style initialization path. When ``False``,
+                sample directly in the target shape without QR.
             
         Returns:
             Initialized tensor.

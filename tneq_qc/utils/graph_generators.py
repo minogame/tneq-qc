@@ -389,22 +389,19 @@ class QCTNHelper:
     def brickwall(nqubits: int, n_layers: int, phys_dim: int = 2) -> str:
         """Generate a brickwall (alternating-layer) quantum circuit graph.
 
-        Directly follows the ``generate_wall_graph`` layout: adjacent qubit-row
-        pairs share cores in a staggered column pattern, with ``n_layers``
-        controlling the total number of columns (``m = n_layers // 2`` cores
-        per row-pair).
+        Each layer applies two-qubit cores on alternating adjacent pairs:
+        layer 0 acts on ``(0,1), (2,3), ...``, layer 1 acts on
+        ``(1,2), (3,4), ...``, and so on.
 
-        Example — ``brickwall(4, n_layers=4, phys_dim=2)``::
+        Example — ``brickwall(3, n_layers=3, phys_dim=2)``::
 
-            -2-a-2-----b-----2-
-            -2-a-2-c-2-b-2-d-2-
-            -2-e-2-c-2-f-2-d-2-
-            -2-e-2-----f-----2-
+            -2-a-2-----c-2-
+            -2-a-2-b-2-c-2-
+            -2-----b-----2-
 
         Args:
             nqubits:  Number of qubits (rows).
-            n_layers: Total column width (``L``); ``m = n_layers // 2`` cores
-                      per adjacent-row pair.
+            n_layers: Number of alternating brickwall layers.
             phys_dim: Physical (boundary) dimension.
 
         Returns:
@@ -412,41 +409,41 @@ class QCTNHelper:
         """
         import opt_einsum
 
+        if nqubits <= 0:
+            return ""
+        if n_layers <= 0:
+            return "\n".join([f"-{phys_dim}-" for _ in range(nqubits)])
+
         dim_char = str(phys_dim)
         n, L = nqubits, n_layers
-        m = L // 2
 
-        total_chars = L * (n // 2)
+        total_chars = sum(len(range(layer % 2, n - 1, 2)) for layer in range(L))
         char_list = [opt_einsum.get_symbol(i) for i in range(total_chars)]
 
-        # 2-D char array: n rows × (4*L) columns, all '-'
         line_list = [['-'] * (4 * L) for _ in range(n)]
-
-        # 最后一列（右边界 dim）
         for i in range(n):
             line_list[i][-2] = dim_char
 
         idx = 0
-        for i in range(n - 1):
-            offset = 0 if i % 2 == 0 else 4
-            for j in range(m):
-                col = offset + 8 * j
-                # 同一 core 同时出现在第 i 行和第 i+1 行
-                line_list[i][col]     = char_list[idx]
-                line_list[i + 1][col] = char_list[idx]
-                # 行内 bond dim（中间列和末尾列的条件）
-                if j < m - 1 or (j == m - 1 and i > 0):
-                    line_list[i][col + 2] = dim_char
-                if j < m - 1 or (j == m - 1 and i != n - 2):
-                    line_list[i + 1][col + 2] = dim_char
+        for layer in range(L):
+            col = 4 * layer
+            start_row = layer % 2
+            for row in range(start_row, n - 1, 2):
+                symbol = char_list[idx]
+                line_list[row][col] = symbol
+                line_list[row + 1][col] = symbol
                 idx += 1
+
+        for row in range(n):
+            occupied_cols = [col for col, token in enumerate(line_list[row]) if token in char_list]
+            for col in occupied_cols[:-1]:
+                line_list[row][col + 2] = dim_char
 
         rows = [
             "-" + dim_char + "-" + "".join(line_list[i])
             for i in range(n)
         ]
         return "\n".join(rows)
-
     @staticmethod
     def circuit_state(nqubits, phys_dim=2):
         """Generate a circuit-state graph: each qubit has one core, no left input dim.

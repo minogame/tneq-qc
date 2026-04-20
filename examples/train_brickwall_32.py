@@ -57,6 +57,38 @@ def make_correlated_gaussian_sampler(ndim):
     return sample_fn
 
 
+def init_circuit_01(qctn: QCTN, backend) -> QCTN:
+    """Fill each circuit core with an alternating 0/1 pattern."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        shape = tuple(core_info['input_shape'] + core_info['output_shape'])
+        n = 1
+        for d in shape:
+            n *= d
+        flat = torch.zeros(n, dtype=backend.default_dtype)
+        for i in range(n):
+            flat[i] = float(i % 2)
+        qctn.cores_weights[core_name] = backend.convert_to_tensor(flat.reshape(shape))
+    return qctn
+
+
+def init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Fill each measure core with an identity matrix placeholder."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        qctn.cores_weights[core_name] = backend.reshape(core, input_shape + output_shape)
+    return qctn
+
+
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
     engine  = EngineCommon(backend=backend, strategy_mode='full')
@@ -67,11 +99,12 @@ def main():
     t0 = time.time()
 
     # 1) CircuitState (ket)
-    circuit = CircuitState(N_QUBITS, PHYS_DIM, backend).auto_init()
+    circuit = CircuitState(N_QUBITS, PHYS_DIM, backend).auto_init(orthogonal=False)
+    circuit = init_circuit_01(circuit, backend)
 
     # 2) Brickwall (trainable)
     bw_graph = QCTNHelper.brickwall(N_QUBITS, n_layers=N_LAYERS, phys_dim=PHYS_DIM)
-    brickwall = QCTN(bw_graph, backend=backend).auto_init()
+    brickwall = QCTN(bw_graph, backend=backend).auto_init(orthogonal=True)
     
     for name in brickwall.core_names:
         brickwall[name].auto_scale()
@@ -79,7 +112,7 @@ def main():
     brickwall.requires_grad_(True)
 
     # 3) MeasureMatrix (data injection)
-    mx = MeasureMatrix(N_QUBITS, PHYS_DIM, backend).auto_init()
+    mx = init_measure_identity(MeasureMatrix(N_QUBITS, PHYS_DIM, backend), backend)
 
     # 4) Hermitian conjugate of brickwall
     bw_hermit = brickwall.hermit()
@@ -278,7 +311,7 @@ def main():
 
     # Reload validation
     print("\n=== Reload Validation ===")
-    bw_val = QCTN(bw_graph, backend=backend).auto_init()
+    bw_val = QCTN(bw_graph, backend=backend)
     bw_val.load_cores(save_path)
     bw_hermit_val = bw_val.hermit()
     combined_val = QCTN.concat([

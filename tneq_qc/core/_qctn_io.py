@@ -15,9 +15,64 @@ from .tn_tensor import TNTensor
 class QCTNIOMixin:
     """Mixin: core tensor init, set_cores, save/load, auto_init."""
 
-    def _init_cores(self, distribution: str = "gaussian"):
+    def _init_single_core(
+        self,
+        *,
+        core_name: str,
+        full_shape,
+        input_dim: int,
+        output_dim: int,
+        distribution: str,
+        orthogonal: bool,
+        fixed_identity_cores,
+    ):
+        if core_name in fixed_identity_cores:
+            if input_dim != output_dim:
+                raise ValueError(
+                    f"Fixed identity core '{core_name}' must be square, "
+                    f"got input_dim={input_dim}, output_dim={output_dim}."
+                )
+            core = self.backend.eye(input_dim)
+            core = self.backend.reshape(core, full_shape)
+            return TNTensor(core, has_batch=False, is_fixed=True, fixed_kind="identity")
+
+        if orthogonal and input_dim == output_dim:
+            core = self.backend.init_random_core(
+                [input_dim, output_dim],
+                distribution=distribution,
+                orthogonal=True,
+            )
+            return self.backend.reshape(core, full_shape)
+
+        if orthogonal:
+            max_dim = max(input_dim, output_dim)
+            core = self.backend.init_random_core(
+                [max_dim, max_dim],
+                distribution=distribution,
+                orthogonal=True,
+            )
+            raw = core.tensor if isinstance(core, TNTensor) else core
+            raw_sliced = raw[:input_dim, :output_dim]
+            if hasattr(raw_sliced, 'contiguous'):
+                raw_sliced = raw_sliced.contiguous()
+            return self.backend.reshape(
+                self.backend.wrap_tensor(raw_sliced) if isinstance(core, TNTensor) else raw_sliced,
+                full_shape,
+            )
+
+        return self.backend.init_random_core(
+            full_shape,
+            distribution=distribution,
+            orthogonal=False,
+        )
+
+    def _init_cores(
+        self,
+        distribution: str = "gaussian",
+        orthogonal: bool = False,
+    ):
         """
-        Initialize the cores of the quantum circuit with random values.
+        Initialize the cores of the quantum circuit.
 
         For each core, use the pre-computed values from adjacency_table:
         - input_shape: ranks from in_edge_list (already ordered by qubit_idx)
@@ -25,12 +80,12 @@ class QCTNIOMixin:
         - input_dim: product of input_shape
         - output_dim: product of output_shape
 
-        The core tensor is initialized with shape [input_dim, output_dim],
-        then reshaped to input_shape + output_shape.
-
         Returns:
             None: The cores are stored in the `cores_weights` attribute.
         """
+        fixed_identity_cores = getattr(self, '_fixed_identity_cores', {})
+        core_batch_size = getattr(self, '_core_batch_size', None)
+
         for idx, core_info in enumerate(self.adjacency_table):
             core_name = core_info['core_name']
             input_shape = core_info['input_shape']
@@ -40,26 +95,36 @@ class QCTNIOMixin:
 
             full_shape = input_shape + output_shape
 
-            if input_dim == output_dim:
-                # Square case: use orthogonal (QR) initialization
-                core = self.backend.init_random_core(
-                    [input_dim, output_dim], distribution=distribution
+            if core_batch_size is not None:
+                batched_raw = []
+                fixed_kind = "identity" if core_name in fixed_identity_cores else None
+                for _ in range(core_batch_size):
+                    single_core = self._init_single_core(
+                        core_name=core_name,
+                        full_shape=full_shape,
+                        input_dim=input_dim,
+                        output_dim=output_dim,
+                        distribution=distribution,
+                        orthogonal=orthogonal,
+                        fixed_identity_cores=fixed_identity_cores,
+                    )
+                    batched_raw.append(single_core.tensor if isinstance(single_core, TNTensor) else single_core)
+                stacked = self.backend.stack(batched_raw, dim=0)
+                core = TNTensor(
+                    stacked,
+                    has_batch=True,
+                    is_fixed=(fixed_kind is not None),
+                    fixed_kind=fixed_kind,
                 )
-                core = self.backend.reshape(core, full_shape)
             else:
-                # Non-square case: orthogonal init is not applicable;
-                # sample a larger square matrix from the chosen distribution,
-                # orthogonalize it, then slice to the target shape.
-                max_dim = max(input_dim, output_dim)
-                core = self.backend.init_random_core(
-                    [max_dim, max_dim], distribution=distribution
-                )
-                # Slice to [input_dim, output_dim] then reshape
-                raw = core.tensor if isinstance(core, TNTensor) else core
-                raw_sliced = raw[:input_dim, :output_dim].contiguous()
-                core = self.backend.reshape(
-                    self.backend.wrap_tensor(raw_sliced) if isinstance(core, TNTensor) else raw_sliced,
-                    full_shape,
+                core = self._init_single_core(
+                    core_name=core_name,
+                    full_shape=full_shape,
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    distribution=distribution,
+                    orthogonal=orthogonal,
+                    fixed_identity_cores=fixed_identity_cores,
                 )
 
             self.cores_weights[core_name] = core
@@ -116,6 +181,13 @@ class QCTNIOMixin:
             ValueError: If the total number of elements does not match.
         """
         target = self.cores_weights[core_name]
+        if isinstance(target, TNTensor) and target.is_fixed:
+            warnings.warn(
+                f"Core '{core_name}' is fixed ({target.fixed_kind}) and cannot be overwritten; ignoring set_cores input.",
+                stacklevel=3,
+            )
+            return
+
         target_shape = tuple(target.shape)
         target_numel = int(np.prod(target_shape))
 
@@ -199,8 +271,9 @@ class QCTNIOMixin:
         dtype=None,
         device=None,
         distribution: str = "gaussian",
+        orthogonal: bool = False,
     ) -> "QCTNIOMixin":
-        """Initialize (or re-initialize) all core tensors with random orthogonal values.
+        """Initialize (or re-initialize) all core tensors.
 
         For graph-based modules, calls :meth:`_init_cores` to populate
         ``cores_weights``.  For composite modules (``graph=None``), recursively
@@ -208,21 +281,24 @@ class QCTNIOMixin:
 
         Args:
             dtype: Optional dtype hint forwarded to submodule ``auto_init``
-                calls.  Not yet used by :meth:`_init_cores` directly; reserved
-                for future backend-level dtype control.
+                calls. Not yet used by :meth:`_init_cores` directly.
             device: Optional device hint forwarded to submodule ``auto_init``
                 calls.
-            distribution: Random distribution used to generate the matrix
-                before orthogonalization. Supported values currently include
-                ``"gaussian"`` (default) and ``"uniform"``.
+            distribution: Random distribution used for initialization.
+            orthogonal: Whether to use QR-based orthogonal initialization.
 
         Returns:
             self — supports chaining, e.g. ``MPS(3, 4).auto_init()``.
         """
         if self.graph is not None:
-            self._init_cores(distribution=distribution)
+            self._init_cores(distribution=distribution, orthogonal=orthogonal)
         for sub in self._submodules.values():
-            sub.auto_init(dtype=dtype, device=device, distribution=distribution)
+            sub.auto_init(
+                dtype=dtype,
+                device=device,
+                distribution=distribution,
+                orthogonal=orthogonal,
+            )
         return self
 
     def save_cores(self, file_path: Union[str, Path], metadata: Optional[Mapping[str, str]] = None):
@@ -259,11 +335,16 @@ class QCTNIOMixin:
         # Persist per-core batch flags. This is required to correctly
         # reconstruct batched mx / teacher cores after reload.
         core_has_batch = {}
+        core_fixed = {}
         for core_name, tensor in self.cores_weights.items():
             if isinstance(tensor, TNTensor):
                 core_has_batch[core_name] = bool(tensor.has_batch)
+                if tensor.is_fixed and tensor.fixed_kind is not None:
+                    core_fixed[core_name] = tensor.fixed_kind
         if core_has_batch:
             metadata_dict['_core_has_batch'] = json.dumps(core_has_batch)
+        if core_fixed:
+            metadata_dict['_core_fixed'] = json.dumps(core_fixed)
 
         save_file(tensor_dict, str(file_path), metadata=metadata_dict)
 
@@ -299,7 +380,22 @@ class QCTNIOMixin:
             except Exception:
                 saved_has_batch = {}
 
+        saved_fixed = {}
+        if '_core_fixed' in metadata:
+            try:
+                saved_fixed = json.loads(metadata['_core_fixed'])
+            except Exception:
+                saved_fixed = {}
+
         for core_name in self.cores:
+            existing = self.cores_weights.get(core_name)
+            if isinstance(existing, TNTensor) and existing.is_fixed:
+                warnings.warn(
+                    f"Core '{core_name}' is fixed ({existing.fixed_kind}) and will not be overwritten by load_cores().",
+                    stacklevel=2,
+                )
+                continue
+
             key = f"core_{core_name}"
             key_real, key_imag = f"core_{core_name}_real", f"core_{core_name}_imag"
             if key_real in tensor_dict:
@@ -318,9 +414,16 @@ class QCTNIOMixin:
             tn_tensor.auto_scale()
             if core_name in self.cores_weights and isinstance(self.cores_weights[core_name], TNTensor):
                 default_has_batch = self.cores_weights[core_name].has_batch
+                default_fixed = self.cores_weights[core_name].fixed_kind if self.cores_weights[core_name].is_fixed else None
             else:
                 default_has_batch = False
+                default_fixed = None
             tn_tensor.has_batch = bool(saved_has_batch.get(core_name, default_has_batch))
+            fixed_kind = saved_fixed.get(core_name, default_fixed)
+            if fixed_kind is not None:
+                tn_tensor.is_fixed = True
+                tn_tensor.fixed_kind = fixed_kind
+                tn_tensor.requires_grad_(False)
             self.cores_weights[core_name] = tn_tensor
 
         metadata_dict = {str(k): str(v) for k, v in metadata.items()}

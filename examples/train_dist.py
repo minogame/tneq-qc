@@ -23,6 +23,7 @@ from tneq_qc import (
 )
 from tneq_qc.distributed import EngineDistributed
 from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
+from tneq_qc.utils.graph_generators import QCTNHelper
 
 N_QUBITS   = 4
 BOND_DIM   = 2
@@ -38,16 +39,33 @@ np.random.seed(42)
 
 def init_circuit_01(qctn: QCTN, backend) -> QCTN:
     """Fill each circuit core with an alternating 0/1 pattern."""
-    for c in qctn.cores:
-        core = qctn.cores_weights[c]
-        shape = tuple(core.shape)
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        shape = tuple(core_info['input_shape'] + core_info['output_shape'])
         n = 1
         for d in shape:
             n *= d
-        flat = torch.zeros(n, dtype=core.dtype)
+        flat = torch.zeros(n, dtype=backend.default_dtype)
         for i in range(n):
             flat[i] = float(i % 2)
-        qctn.cores_weights[c] = backend.convert_to_tensor(flat.reshape(shape))
+        qctn.cores_weights[core_name] = backend.convert_to_tensor(flat.reshape(shape))
+    return qctn
+
+
+def init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Fill each measure core with an identity matrix placeholder."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        qctn.cores_weights[core_name] = backend.reshape(core, input_shape + output_shape)
     return qctn
 
 
@@ -71,9 +89,12 @@ def main():
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
     # Build model
-    model = Quadratic(nqubits=N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM,
-                      backend=backend).auto_init()
+    graph = QCTNHelper.mps(N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM)
+    model = Quadratic(graph, PHYS_DIM, backend=backend)
+    model._submodules['mps'].auto_init(orthogonal=True)
+    model._submodules['circuit'].auto_init(orthogonal=False)
     init_circuit_01(model._submodules['circuit'], backend)
+    init_measure_identity(model._submodules['mx'], backend)
     model._submodules['mps'].requires_grad_(True)
     combined = model.build()
 

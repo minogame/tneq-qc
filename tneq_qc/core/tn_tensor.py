@@ -1,4 +1,5 @@
 import math
+import warnings
 from typing import Any, Optional
 
 
@@ -34,6 +35,8 @@ class TNTensor:
         has_batch: bool = False,
         is_ref: bool = False,
         is_transposed: bool = False,
+        is_fixed: bool = False,
+        fixed_kind: Optional[str] = None,
         source: Optional["TNTensor"] = None,
         name: Optional[str] = None,
         _source_info: Optional[dict] = None,
@@ -66,9 +69,15 @@ class TNTensor:
                 is_ref = tensor.is_ref
             if not is_transposed:
                 is_transposed = tensor.is_transposed
+            if not is_fixed and fixed_kind is None:
+                is_fixed = tensor.is_fixed
+                fixed_kind = tensor.fixed_kind
             if source is None:
                 source = tensor.source
             tensor = tensor._tensor
+
+        if fixed_kind is not None:
+            is_fixed = True
 
         self._tensor = tensor
         self.scale = float(scale)
@@ -80,9 +89,14 @@ class TNTensor:
         self.has_batch = has_batch
         self.is_ref = is_ref
         self.is_transposed = is_transposed
+        self.is_fixed = is_fixed
+        self.fixed_kind = fixed_kind
         self.source = source
         self.name = name
         self._source_info = _source_info
+
+        if self.is_fixed and hasattr(self._tensor, "requires_grad_"):
+            self._tensor.requires_grad_(False)
 
     # ------------------------------------------------------------------
     # Core mutator
@@ -97,6 +111,13 @@ class TNTensor:
             has_batch: If not None, overwrite the ``has_batch`` flag.
                        Passing ``True`` marks the first dimension as batch.
         """
+        if self.is_fixed:
+            warnings.warn(
+                f"Ignoring set() on fixed TNTensor ({self.fixed_kind}).",
+                stacklevel=2,
+            )
+            return
+
         # Unwrap nested TNTensor.
         if isinstance(tensor, TNTensor):
             scale = float(tensor.scale * scale)
@@ -111,6 +132,35 @@ class TNTensor:
         )
         if has_batch is not None:
             self.has_batch = has_batch
+
+
+    def _view_like(
+        self,
+        tensor: Any,
+        *,
+        has_batch: Optional[bool] = None,
+        is_ref: bool = False,
+        is_transposed: bool = False,
+        source: Optional["TNTensor"] = None,
+        name: Optional[str] = None,
+        _source_info: Optional[dict] = None,
+    ) -> "TNTensor":
+        base_source = self if source is None else source
+        if source is None and self.is_ref and self.source is not None:
+            base_source = self.source
+        return TNTensor(
+            tensor,
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch if has_batch is None else has_batch,
+            is_ref=is_ref,
+            is_transposed=is_transposed,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+            source=base_source,
+            name=name,
+            _source_info=_source_info,
+        )
 
     # ------------------------------------------------------------------
     # Properties – tensor metadata
@@ -193,10 +243,8 @@ class TNTensor:
 
     def reshape(self, shape) -> "TNTensor":
         """Return a reshaped view; scale is unchanged."""
-        return TNTensor(
+        return self._view_like(
             self._tensor.reshape(shape),
-            scale=self.scale,
-            log_scale=self.log_scale,
             is_ref=True,
             source=self,
         )
@@ -222,17 +270,15 @@ class TNTensor:
                     import numpy as np
                     raw_t = np.transpose(raw, dims)
         else:
-            if hasattr(raw, "T"):
-                raw_t = raw.T
-            elif hasattr(raw, "permute"):
+            if hasattr(raw, "permute"):
                 raw_t = raw.permute(*reversed(range(raw.ndim)))
+            elif hasattr(raw, "T"):
+                raw_t = raw.T
             else:
                 raw_t = raw.transpose()
 
-        return TNTensor(
+        return self._view_like(
             raw_t,
-            scale=self.scale,
-            log_scale=self.log_scale,
             is_ref=True,
             is_transposed=True,
             source=self,
@@ -247,17 +293,46 @@ class TNTensor:
             raw_c = raw.conjugate()
         else:
             raw_c = raw  # real tensor – no-op
-        return TNTensor(
+        return self._view_like(
             raw_c,
-            scale=self.scale,
-            log_scale=self.log_scale,
             is_ref=True,
             source=self,
         )
 
     def conj_transpose(self, *dims) -> "TNTensor":
         """Conjugate then transpose (dagger). Marks ``is_transposed=True``."""
-        return self.conj().transpose(*dims)
+        raw = self._tensor
+        if hasattr(raw, "conj"):
+            raw_c = raw.conj()
+        elif hasattr(raw, "conjugate"):
+            raw_c = raw.conjugate()
+        else:
+            raw_c = raw
+
+        if dims:
+            if hasattr(raw_c, "permute"):
+                raw_t = raw_c.permute(*dims)
+            else:
+                try:
+                    import jax.numpy as jnp
+                    raw_t = jnp.transpose(raw_c, dims)
+                except ImportError:
+                    import numpy as np
+                    raw_t = np.transpose(raw_c, dims)
+        else:
+            if hasattr(raw_c, "permute"):
+                raw_t = raw_c.permute(*reversed(range(raw_c.ndim)))
+            elif hasattr(raw_c, "T"):
+                raw_t = raw_c.T
+            else:
+                raw_t = raw_c.transpose()
+
+        return self._view_like(
+            raw_t,
+            is_ref=True,
+            is_transposed=True,
+            source=self,
+        )
 
     def clone(self, deep: bool = True) -> "TNTensor":
         """Return a cloned TNTensor.
@@ -287,6 +362,9 @@ class TNTensor:
             raw_copy,
             scale=self.scale,
             log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
             name=f"{self.name}_clone" if self.name else None,
             _source_info={'type': 'clone', 'base': self.name, 'deep': deep}
         )
@@ -336,15 +414,13 @@ class TNTensor:
                 import numpy as np
                 hermit_data = np.transpose(hermit_data, axes)
 
-        return TNTensor(
+        return self._view_like(
             hermit_data,
-            scale=self.scale,
-            log_scale=self.log_scale,
             is_ref=True,
             is_transposed=True,
             source=self,
             name=f"{self.name}_H" if self.name else None,
-            _source_info={'type': 'hermit', 'base': self.name, 'axes': axes}
+            _source_info={'type': 'hermit', 'base': self.name, 'axes': axes},
         )
 
     def to(self, device=None, dtype=None) -> "TNTensor":
@@ -370,7 +446,14 @@ class TNTensor:
                     raw_new = raw_new.astype(dtype)
             except ImportError:
                 raw_new = raw
-        return TNTensor(raw_new, scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(
+            raw_new,
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     # ------------------------------------------------------------------
     # Indexing / slicing
@@ -378,10 +461,23 @@ class TNTensor:
 
     def __getitem__(self, key) -> "TNTensor":
         """Index / slice the underlying tensor; scale is preserved."""
-        return TNTensor(self._tensor[key], scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(
+            self._tensor[key],
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     def __setitem__(self, key, value):
         """In-place element assignment. *value* may be TNTensor or raw tensor."""
+        if self.is_fixed:
+            warnings.warn(
+                f"Ignoring __setitem__ on fixed TNTensor ({self.fixed_kind}).",
+                stacklevel=2,
+            )
+            return
         if isinstance(value, TNTensor):
             self._tensor[key] = value._tensor
         else:
@@ -396,6 +492,14 @@ class TNTensor:
         return getattr(self._tensor, "requires_grad", False)
 
     def requires_grad_(self, requires_grad: bool = True) -> "TNTensor":
+        if self.is_fixed and requires_grad:
+            warnings.warn(
+                f"Ignoring requires_grad_(True) on fixed TNTensor ({self.fixed_kind}).",
+                stacklevel=2,
+            )
+            if hasattr(self._tensor, "requires_grad_"):
+                self._tensor.requires_grad_(False)
+            return self
         if hasattr(self._tensor, "requires_grad_"):
             self._tensor.requires_grad_(requires_grad)
         return self
@@ -417,7 +521,14 @@ class TNTensor:
         raw = self._tensor
         if hasattr(raw, "detach"):
             raw = raw.detach()
-        return TNTensor(raw, scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(
+            raw,
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     def backward(self, *args, **kwargs):
         """Proxy backward to the underlying tensor (PyTorch only)."""
@@ -623,7 +734,14 @@ class TNTensor:
     def contiguous(self) -> "TNTensor":
         """Return contiguous-memory copy (PyTorch) or self (others)."""
         if hasattr(self._tensor, "contiguous"):
-            return TNTensor(self._tensor.contiguous(), scale=self.scale, log_scale=self.log_scale)
+            return TNTensor(
+                self._tensor.contiguous(),
+                scale=self.scale,
+                log_scale=self.log_scale,
+                has_batch=self.has_batch,
+                is_fixed=self.is_fixed,
+                fixed_kind=self.fixed_kind,
+            )
         return self
 
     def abs(self) -> "TNTensor":
@@ -660,13 +778,34 @@ class TNTensor:
 
     def unsqueeze(self, dim) -> "TNTensor":
         """Insert a size-1 dimension at *dim*."""
-        return TNTensor(self._tensor.unsqueeze(dim), scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(
+            self._tensor.unsqueeze(dim),
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     def squeeze(self, dim=None) -> "TNTensor":
         """Remove size-1 dimensions."""
         if dim is None:
-            return TNTensor(self._tensor.squeeze(), scale=self.scale, log_scale=self.log_scale)
-        return TNTensor(self._tensor.squeeze(dim), scale=self.scale, log_scale=self.log_scale)
+            return TNTensor(
+                self._tensor.squeeze(),
+                scale=self.scale,
+                log_scale=self.log_scale,
+                has_batch=False,
+                is_fixed=self.is_fixed,
+                fixed_kind=self.fixed_kind,
+            )
+        return TNTensor(
+            self._tensor.squeeze(dim),
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=(False if dim in (0, -self.ndim) and self.has_batch else self.has_batch),
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     def view(self, *shape) -> "TNTensor":
         """PyTorch-style view (same as reshape)."""
@@ -678,7 +817,14 @@ class TNTensor:
 
     def expand(self, *sizes) -> "TNTensor":
         """Expand tensor to a larger size (PyTorch-style broadcast)."""
-        return TNTensor(self._tensor.expand(*sizes), scale=self.scale, log_scale=self.log_scale)
+        return TNTensor(
+            self._tensor.expand(*sizes),
+            scale=self.scale,
+            log_scale=self.log_scale,
+            has_batch=self.has_batch,
+            is_fixed=self.is_fixed,
+            fixed_kind=self.fixed_kind,
+        )
 
     def cpu(self) -> "TNTensor":
         """Move to CPU."""
@@ -698,20 +844,41 @@ class TNTensor:
     def __iter__(self):
         """Iterate along dim 0, yielding TNTensors."""
         for i in range(len(self._tensor)):
-            yield TNTensor(self._tensor[i], scale=self.scale, log_scale=self.log_scale)
+            yield TNTensor(
+                self._tensor[i],
+                scale=self.scale,
+                log_scale=self.log_scale,
+                has_batch=False,
+                is_fixed=self.is_fixed,
+                fixed_kind=self.fixed_kind,
+            )
 
     def float(self) -> "TNTensor":
         """Cast to float32."""
         raw = self._tensor
         if hasattr(raw, "float"):
-            return TNTensor(raw.float(), scale=self.scale, log_scale=self.log_scale)
+            return TNTensor(
+                raw.float(),
+                scale=self.scale,
+                log_scale=self.log_scale,
+                has_batch=self.has_batch,
+                is_fixed=self.is_fixed,
+                fixed_kind=self.fixed_kind,
+            )
         return self.to(dtype="float32")
 
     def double(self) -> "TNTensor":
         """Cast to float64."""
         raw = self._tensor
         if hasattr(raw, "double"):
-            return TNTensor(raw.double(), scale=self.scale, log_scale=self.log_scale)
+            return TNTensor(
+                raw.double(),
+                scale=self.scale,
+                log_scale=self.log_scale,
+                has_batch=self.has_batch,
+                is_fixed=self.is_fixed,
+                fixed_kind=self.fixed_kind,
+            )
         return self.to(dtype="float64")
 
     # ------------------------------------------------------------------
@@ -725,5 +892,7 @@ class TNTensor:
             flags.append("ref")
         if self.is_transposed:
             flags.append("T")
+        if self.is_fixed:
+            flags.append(f"fixed:{self.fixed_kind}")
         flag_str = f", flags=[{','.join(flags)}]" if flags else ""
         return f"TNTensor(shape={shape}, scale={self.scale:.4g}{flag_str})"

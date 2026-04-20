@@ -1,10 +1,11 @@
 """MNIST batch training example.
 
-One student model (model2) learns B MNIST images simultaneously.
+One batched student model (model2) learns B MNIST images simultaneously.
 
 - model1 (teacher): shared core 'A' with batch dimension (B images stacked).
-- model2 (student): shared core 'A' without batch (single set of parameters).
-- Loss = MSE averaged over all B images (broadcasting).
+- model2 (student): shared core 'A' also has batch dimension, so each batch
+  slice learns its corresponding teacher image.
+- Loss = MSE averaged over the B aligned teacher/student pairs.
 
 After training: saves model, outputs comparison image grid and loss curve.
 
@@ -65,9 +66,9 @@ def init_teacher_batch(graph: str, images: torch.Tensor, backend):
     Core A shape becomes (B, 2, 2, ..., 2) with has_batch=True.
     """
     qctn = QCTN(graph, backend=backend)
-    qctn.auto_init()
 
-    core_shape = tuple(qctn.cores_weights['A'].shape)     # (2,)*10
+    core_info = next(info for info in qctn.adjacency_table if info['core_name'] == 'A')
+    core_shape = tuple(core_info['input_shape'] + core_info['output_shape'])
     n_elem = 1
     for d in core_shape:
         n_elem *= d
@@ -90,15 +91,28 @@ def init_teacher_batch(graph: str, images: torch.Tensor, backend):
     return qctn
 
 
-def init_student(graph: str, backend):
-    """Create model2 with trainable (non-batched) core A."""
+def init_student_batch(graph: str, batch_size: int, backend):
+    """Create model2 with batched trainable cores.
+
+    Each batch slice owns an independent copy of the shared core tensor, so
+    batch item ``b`` learns teacher image ``b`` directly.
+    """
     qctn = QCTN(graph, backend=backend)
-    qctn.auto_init()
+    qctn.add_core_batch_size(batch_size)
+    qctn.auto_init(orthogonal=False)
     for c in qctn.cores:
         core = qctn.cores_weights[c]
+        if getattr(core, "is_fixed", False):
+            continue
         noise = torch.randn_like(core.tensor) * 0.01
-        core.set(core.tensor + noise, core.scale)
-        core.requires_grad_(True)
+        qctn.cores_weights[c] = TNTensor(
+            core.tensor + noise,
+            scale=core.scale,
+            has_batch=core.has_batch,
+            is_fixed=core.is_fixed,
+            fixed_kind=core.fixed_kind,
+        )
+        qctn.cores_weights[c].requires_grad_(True)
     return qctn
 
 
@@ -158,13 +172,13 @@ def main():
     model1 = init_teacher_batch(graph, images, backend)
     print_qctn_info(model1, label="Model 1 (teacher)")
 
-    # ── Student (model2): single shared core, trainable ──────────────────
+    # ── Student (model2): batched trainable cores ────────────────────────
     print()
     print("=" * 60)
-    print("Model 2  (student — shared params, trainable)")
+    print(f"Model 2  (student — {BATCH_SIZE} batched params, trainable)")
     print("=" * 60)
 
-    model2 = init_student(graph, backend)
+    model2 = init_student_batch(graph, BATCH_SIZE, backend)
     print_qctn_info(model2, label="Model 2 (student)")
     print(f"  Trainable cores: {len(model2.parameters())}")
 
@@ -217,43 +231,38 @@ def main():
 
     with torch.no_grad():
         result1 = engine.contract(model1)   # batched: (B, 2, 2, ...)
-        result2 = engine.contract(model2)   # scalar:  (2, 2, ...)
+        result2 = engine.contract(model2)   # batched: (B, 2, 2, ...)
 
     result1_np = backend.tensor_to_numpy(result1)
     result2_np = backend.tensor_to_numpy(result2)
 
     # Per-image MSE
     B = BATCH_SIZE
-    student_flat = result2_np.flatten()
     for i in range(B):
         teacher_flat = result1_np[i].flatten()
+        student_flat = result2_np[i].flatten()
         mse_i = np.mean((student_flat - teacher_flat) ** 2)
         print(f"  Image {i} (digit {labels[i]}): MSE={mse_i:.6f}")
 
     # ── Save comparison grid ─────────────────────────────────────────────
-    n_cols = min(B, 4)
-    n_rows = (B + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols + 1, figsize=(3 * (n_cols + 1), 3 * n_rows))
+    n_cols = 2
+    n_rows = B
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6, 3 * n_rows))
     if n_rows == 1:
         axes = axes[np.newaxis, :]
 
-    # Student output (same for all)
-    student_img = tensor_to_image(result2_np, IMAGE_SIZE)
+    for i in range(B):
+        teacher_img = tensor_to_image(result1_np[i], IMAGE_SIZE)
+        student_img = tensor_to_image(result2_np[i], IMAGE_SIZE)
 
-    for i in range(n_rows):
-        for j in range(n_cols):
-            idx = i * n_cols + j
-            ax = axes[i, j]
-            if idx < B:
-                teacher_img = tensor_to_image(result1_np[idx], IMAGE_SIZE)
-                ax.imshow(teacher_img, cmap='gray')
-                ax.set_title(f'Teacher #{idx}\n(digit {labels[idx]})',
-                             fontsize=9)
-            ax.axis('off')
-        # Last column: student
-        ax_s = axes[i, n_cols]
+        ax_t = axes[i, 0]
+        ax_t.imshow(teacher_img, cmap='gray')
+        ax_t.set_title(f'Teacher #{i}\n(digit {labels[i]})', fontsize=9)
+        ax_t.axis('off')
+
+        ax_s = axes[i, 1]
         ax_s.imshow(student_img, cmap='gray')
-        ax_s.set_title('Student', fontsize=9)
+        ax_s.set_title(f'Student #{i}', fontsize=9)
         ax_s.axis('off')
 
     comparison_path = os.path.join(ASSETS_DIR, "comparison.png")
@@ -278,7 +287,6 @@ def main():
     # ── Reload verification ──────────────────────────────────────────────
     print("\n=== Reload Validation ===")
     model2_loaded = QCTN(graph, backend=backend)
-    model2_loaded.auto_init()
     model2_loaded.load_cores(save_path)
 
     with torch.no_grad():

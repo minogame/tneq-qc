@@ -116,6 +116,38 @@ LR           = 0.01
 LOG_EVERY    = 1
 SAVE_DIR     = "checkpoints"
 
+def init_circuit_01(qctn: QCTN, backend) -> QCTN:
+    """Fill each circuit core with an alternating 0/1 pattern."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        shape = tuple(core_info['input_shape'] + core_info['output_shape'])
+        n = 1
+        for d in shape:
+            n *= d
+        flat = torch.zeros(n, dtype=backend.default_dtype)
+        for i in range(n):
+            flat[i] = float(i % 2)
+        qctn.cores_weights[core_name] = backend.convert_to_tensor(flat.reshape(shape))
+    return qctn
+
+
+def init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Fill each measure core with an identity matrix placeholder."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        qctn.cores_weights[core_name] = backend.reshape(core, input_shape + output_shape)
+    return qctn
+
+
 def main():
     # --- Distributed setup ---
     if 'RANK' in os.environ:
@@ -150,11 +182,12 @@ def main():
     # --- Build 5-segment Quadratic structure ---
     t0 = time.time()
 
-    custom_tn = QCTN(tn_graph, backend=backend).auto_init()
+    custom_tn = QCTN(tn_graph, backend=backend).auto_init(orthogonal=True)
     custom_tn.requires_grad_(True)
 
-    circuit     = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init()
-    mx          = MeasureMatrix(actual_qubits, PHYS_DIM, backend).auto_init()
+    circuit     = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init(orthogonal=False)
+    circuit     = init_circuit_01(circuit, backend)
+    mx          = init_measure_identity(MeasureMatrix(actual_qubits, PHYS_DIM, backend), backend)
     tn_hermit   = custom_tn.hermit()
     circuit_bra = circuit.bra()
 

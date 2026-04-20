@@ -105,8 +105,23 @@ class TestGenerateRandomExampleGraph:
 
 
 # ======================================================================
-# QCTNHelper.mps  (named constructor)
+# QCTNHelper.brickwall / mps  (named constructors)
 # ======================================================================
+
+class TestBrickwall:
+
+    def test_brickwall_odd_layers_preserves_all_layers(self, backend):
+        graph = QCTNHelper.brickwall(nqubits=3, n_layers=3, phys_dim=2)
+        print(f"\n[QCTNHelper.brickwall, nqubits=3, n_layers=3]\n{graph}")
+        _check_rows(graph, 3)
+        qctn = _parse(graph, backend)
+        assert qctn.nqubits == 3
+
+        rows = [r for r in graph.strip().splitlines() if r.strip()]
+        assert re.findall(r"[A-Za-z]", rows[0]) == ["a", "c"]
+        assert re.findall(r"[A-Za-z]", rows[1]) == ["a", "b", "c"]
+        assert re.findall(r"[A-Za-z]", rows[2]) == ["b"]
+
 
 class TestMps:
 

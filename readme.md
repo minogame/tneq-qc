@@ -92,7 +92,8 @@ backend = BackendFactory.create_backend('pytorch', device='cpu')
 data_gen = DataGenerator(backend, mx_K=2)
 
 # Build model
-model = Quadratic(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
+graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
+model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
 model._submodules['mps'].requires_grad_(True)
 combined = model.build()   # returns ready-to-contract QCTN
 

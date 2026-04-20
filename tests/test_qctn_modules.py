@@ -56,7 +56,7 @@ def mps3(backend):
 
 @pytest.fixture
 def mps3_init(mps3):
-    return mps3.auto_init()
+    return mps3.auto_init(orthogonal=True)
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def cs3(backend):
 
 @pytest.fixture
 def cs3_init(cs3):
-    return cs3.auto_init()
+    return cs3.auto_init(orthogonal=True)
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def mx3(backend):
 
 @pytest.fixture
 def mx3_init(mx3):
-    return mx3.auto_init()
+    return mx3.auto_init(orthogonal=True)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class TestSmallModuleInit:
             assert name in mps3_init.cores_weights
 
     def test_mps_auto_init_returns_self(self, mps3):
-        result = mps3.auto_init()
+        result = mps3.auto_init(orthogonal=True)
         assert result is mps3
 
     def test_mps_core_shapes_correct(self, mps3_init):
@@ -126,14 +126,14 @@ class TestSmallModuleInit:
 
     def test_auto_init_dtype_complex(self, mps3):
         """auto_init should produce complex tensors when backend dtype is complex64."""
-        mps3.auto_init()
+        mps3.auto_init(orthogonal=True)
         for name, tensor in mps3.cores_weights.items():
             t = tensor.tensor if isinstance(tensor, TNTensor) else tensor
             assert t.is_complex(), f"Core {name} is not complex: {t.dtype}"
 
     def test_set_cores_external(self, backend):
         """set_cores with dict should replace cores_weights."""
-        mps = MPS(nqubits=2, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        mps = MPS(nqubits=2, bond_dim=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         new_weights = {}
         for name, tensor in mps.cores_weights.items():
             t = tensor.tensor if isinstance(tensor, TNTensor) else tensor
@@ -156,13 +156,13 @@ class TestAppModuleInit:
         assert isinstance(model._submodules["mps"], MPS)
 
     def test_plain_mps_named_cores_count(self, backend):
-        model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init()
+        model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init(orthogonal=True)
         names = [n for n, _ in model.named_cores()]
         # staggered MPS has nqubits-1 cores
         assert len(names) == 2
 
     def test_plain_mps_named_cores_prefixed(self, backend):
-        model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init()
+        model = PlainMPS(nqubits=3, bond_dim=4, backend=backend).auto_init(orthogonal=True)
         names = [n for n, _ in model.named_cores()]
         for n in names:
             assert n.startswith("mps.")
@@ -175,7 +175,7 @@ class TestAppModuleInit:
         assert isinstance(model._submodules["mps"], MPS)
 
     def test_encoding_all_cores_count(self, backend):
-        model = Encoding(nqubits=3, bond_dim=4, backend=backend).auto_init()
+        model = Encoding(nqubits=3, bond_dim=4, backend=backend).auto_init(orthogonal=True)
         # 3 circuit cores + 2 mps cores = 5 (staggered MPS)
         assert len(model.all_cores) == 5
 
@@ -185,26 +185,38 @@ class TestAppModuleInit:
         assert "mps2" in model._submodules
 
     def test_tneq_all_cores_count(self, backend):
-        model = TNEQ(nqubits=3, bond_dim=4, backend=backend).auto_init()
+        model = TNEQ(nqubits=3, bond_dim=4, backend=backend).auto_init(orthogonal=True)
         # mps1: 2 cores + mps2: 2 cores = 4 (staggered MPS)
         assert len(model.all_cores) == 4
 
     def test_quadratic_submodules(self, backend):
-        model = Quadratic(nqubits=3, bond_dim=4, backend=backend)
+        graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
+        model = Quadratic(graph, 2, backend=backend)
         assert "circuit" in model._submodules
         assert "mps" in model._submodules
         assert "mx" in model._submodules
 
     def test_quadratic_all_cores_count(self, backend):
-        model = Quadratic(nqubits=3, bond_dim=4, backend=backend).auto_init()
+        graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
+        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
         # circuit: 3 + mps: 2 + mx: 3 = 8 (staggered MPS)
         assert len(model.all_cores) == 8
+
+    def test_quadratic_accepts_graph(self, backend):
+        graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
+        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
+        assert model._submodules["mps"].graph is not None
+        assert model._submodules["mps"].nqubits == 3
+
+    def test_quadratic_requires_graph(self, backend):
+        with pytest.raises(ValueError, match="non-None graph string"):
+            Quadratic(None, 2, backend=backend)
 
     def test_auto_init_chain_propagates(self, backend):
         """auto_init on parent should init all submodules."""
         model = TNEQ(nqubits=2, bond_dim=3, backend=backend)
         assert model._submodules["mps1"].cores_weights == {}
-        model.auto_init()
+        model.auto_init(orthogonal=True)
         assert len(model._submodules["mps1"].cores_weights) == 1
         assert len(model._submodules["mps2"].cores_weights) == 1
 
@@ -221,9 +233,9 @@ class TestComposition:
         container = QCTN(graph=None, backend=backend)
         container.register_module("circuit", CircuitState(nq, 2, backend))
         container.register_module("mps", MPS(nq, bd, 2, backend))
-        container.auto_init()
+        container.auto_init(orthogonal=True)
 
-        encoding = Encoding(nq, bd, backend=backend).auto_init()
+        encoding = Encoding(nq, bd, backend=backend).auto_init(orthogonal=True)
         assert len(container.all_cores) == len(encoding.all_cores)
 
     def test_manual_quadratic_composition(self, backend):
@@ -233,7 +245,7 @@ class TestComposition:
         container.register_module("circuit", CircuitState(nq, 2, backend))
         container.register_module("mps", MPS(nq, 4, 2, backend))
         container.register_module("mx", MeasureMatrix(nq, 2, backend))
-        container.auto_init()
+        container.auto_init(orthogonal=True)
         assert len(container.all_cores) == 8
 
 
@@ -253,7 +265,7 @@ class TestTransposeAndRef:
 
     def test_transpose_mps_reflects_source_change(self, backend):
         """In-place modification of source MPS tensor is visible in TransposeMPS."""
-        mps = MPS(nqubits=2, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        mps = MPS(nqubits=2, bond_dim=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         trans = TransposeMPS(mps)
 
         # Get the first core name
@@ -274,7 +286,7 @@ class TestTransposeAndRef:
 
     def test_mps_with_ref_right_is_ref(self, backend):
         """After auto_init, right MPS cores should be conj-transpose refs of left."""
-        model = MPS_with_Ref(nqubits=2, bond_dim=3, backend=backend).auto_init()
+        model = MPS_with_Ref(nqubits=2, bond_dim=3, backend=backend).auto_init(orthogonal=True)
         left = model._submodules["left"]
         right = model._submodules["right"]
 
@@ -286,7 +298,7 @@ class TestTransposeAndRef:
 
     def test_mps_with_ref_shares_data(self, backend):
         """Right core's source should be the same TNTensor as left core."""
-        model = MPS_with_Ref(nqubits=2, bond_dim=3, backend=backend).auto_init()
+        model = MPS_with_Ref(nqubits=2, bond_dim=3, backend=backend).auto_init(orthogonal=True)
         left = model._submodules["left"]
         right = model._submodules["right"]
 
@@ -298,7 +310,7 @@ class TestTransposeAndRef:
 
     def test_tneq_two_independent_mps(self, backend):
         """TNEQ mps1 and mps2 should NOT share parameter storage."""
-        model = TNEQ(nqubits=2, bond_dim=3, backend=backend).auto_init()
+        model = TNEQ(nqubits=2, bond_dim=3, backend=backend).auto_init(orthogonal=True)
         mps1 = model._submodules["mps1"]
         mps2 = model._submodules["mps2"]
 
@@ -318,7 +330,7 @@ class TestTransposeAndRef:
 class TestChunkConcat:
 
     def test_chunk_returns_two_qctns(self, backend):
-        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init()
+        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init(orthogonal=True)
         q1, q2 = qctn.chunk()
         print(f"\n[chunk] original:\n{qctn}")
         print(f"[chunk] q1:\n{q1}")
@@ -327,13 +339,13 @@ class TestChunkConcat:
         assert isinstance(q2, QCTN)
 
     def test_chunk_core_counts(self, backend):
-        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init()
+        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init(orthogonal=True)
         q1, q2 = qctn.chunk()
         assert q1.ncores + q2.ncores == qctn.ncores
 
     def test_concat_returns_qctn(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
+        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
+        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
         merged = QCTN.concat(q1, q2)
         print(f"\n[concat] q1:\n{q1}")
         print(f"[concat] q2:\n{q2}")
@@ -341,32 +353,32 @@ class TestChunkConcat:
         assert isinstance(merged, QCTN)
 
     def test_concat_core_count(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
+        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
+        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
         merged = QCTN.concat(q1, q2)
         assert merged.ncores == q1.ncores + q2.ncores
 
     def test_concat_with_instance_method(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
+        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
+        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
         merged = q1.concat_with(q2)
         print(f"\n[concat_with] merged:\n{merged}")
         assert merged.ncores == q1.ncores + q2.ncores
 
     def test_split_raises_deprecation_warning(self, backend):
-        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init()
+        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init(orthogonal=True)
         with pytest.warns(DeprecationWarning, match="chunk"):
             qctn.split()
 
     def test_merge_raises_deprecation_warning(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
+        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
+        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
         with pytest.warns(DeprecationWarning, match="concat"):
             QCTN.merge(q1, q2)
 
     def test_merge_with_raises_deprecation_warning(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init()
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init()
+        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
+        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
         with pytest.warns(DeprecationWarning, match="concat_with"):
             q1.merge_with(q2)
 
@@ -419,7 +431,7 @@ class TestComplexChunkConcat:
 
     # 1a. MPS chunk
     def test_mps_chunk(self, backend):
-        mps = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        mps = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         q1, q2 = mps.chunk()
         print(f"\n[mps_chunk] original:\n{mps}")
         print(f"[mps_chunk] q1:\n{q1}")
@@ -429,7 +441,7 @@ class TestComplexChunkConcat:
     # 1b. MPS + Tree concat
     def test_mps_tree_concat(self, backend):
         tree_graph = QCTNHelper.generate_example_graph(n=4, graph_type="tree")
-        mps  = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init()
+        mps  = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         tree = QCTN(tree_graph, backend=backend)
         merged = QCTN.concat(mps, tree)
         print(f"\n[mps+tree] mps:\n{mps}")
@@ -439,8 +451,8 @@ class TestComplexChunkConcat:
 
     # 2. MPS + MPS转置 concat
     def test_mps_mpsT_concat(self, backend):
-        mps  = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
-        mpsT = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
+        mps  = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        mpsT = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         merged = QCTN.concat(mps, mpsT)
         print(f"\n[mps+mpsT] mps:\n{mps}")
         print(f"[mps+mpsT] mpsT:\n{mpsT}")
@@ -449,9 +461,9 @@ class TestComplexChunkConcat:
 
     # 3. CS + MPS + MX concat
     def test_cs_mps_mx_concat(self, backend):
-        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
-        mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
-        mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         merged = QCTN.concat(QCTN.concat(cs, mps), mx)
         print(f"\n[cs+mps+mx] cs:\n{cs}")
         print(f"[cs+mps+mx] mps:\n{mps}")
@@ -461,8 +473,8 @@ class TestComplexChunkConcat:
 
     # 4. CS + CS转置 concat
     def test_cs_csT_concat(self, backend):
-        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
-        csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         merged = QCTN.concat(cs, csT)
         print(f"\n[cs+csT] cs:\n{cs}")
         print(f"[cs+csT] csT:\n{csT}")
@@ -471,17 +483,17 @@ class TestComplexChunkConcat:
 
     # 5. CS + MPS + MX + MX转置 + CS转置 concat
     def test_full_chain_concat(self, backend):
-        cs  = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
-        mps = MPS(nqubits=5, bond_dim=3, phys_dim=3, backend=backend).auto_init()
-        mx  = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init()
-        mxT = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init()
-        csT = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        cs  = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        mps = MPS(nqubits=5, bond_dim=3, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        mx  = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        mxT = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        csT = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
 
-        # cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
-        # mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init()
-        # mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
-        # mxT = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init()
-        # csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init()
+        # cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        # mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        # mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        # mxT = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        # csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         merged = cs.concat_with(mps).concat_with(mx).concat_with(mxT).concat_with(csT)
         print(f"\n[full_chain] cs:\n{cs}")
         print(f"[full_chain] mps:\n{mps}")
@@ -525,7 +537,7 @@ class TestQuadraticQCTNModules:
 
     def test_print_all_graphs_and_qctn(self, backend):
 
-        cs = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init()
+        cs = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
         graph = "-2-A-2\n-2-A-2\n"
         tn = QCTN(graph, backend=backend)
         
