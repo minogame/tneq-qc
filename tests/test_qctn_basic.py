@@ -355,3 +355,47 @@ class TestEinsumStrategyDelegation:
         measure = [torch.eye(2).unsqueeze(0), torch.eye(2).unsqueeze(0)]
         result = compute_fn(cores_dict, states, measure)
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# TestBatchAndIdentity
+# ---------------------------------------------------------------------------
+
+class TestBatchAndIdentity:
+    def test_empty_qubit_line_injects_fixed_identity(self, backend):
+        graph = "-2-A-2-\n\n-2-B-2-"
+        qctn = QCTN(graph, backend=backend)
+        assert qctn.nqubits == 3
+        identity_syms = [sym for sym, name in qctn.core_names.items() if name.startswith("identity.q")]
+        assert len(identity_syms) == 1
+        sym = identity_syms[0]
+        tensor = qctn.cores_weights[sym]
+        assert tensor.is_fixed is True
+        assert tensor.fixed_kind == "identity"
+        assert torch.allclose(tensor.tensor, torch.eye(2))
+
+    def test_set_core_batch_size_adds_batch_dimension(self, backend):
+        qctn = QCTN.from_graph("-2-A-2-\n-2-B-2-", backend=backend)
+        before = {name: qctn.cores_weights[name].tensor.clone() for name in qctn.cores}
+        qctn.set_core_batch_size(3)
+        for name in qctn.cores:
+            tensor = qctn.cores_weights[name]
+            assert tensor.has_batch is True
+            assert tensor.shape[0] == 3
+            for i in range(3):
+                assert torch.allclose(tensor.tensor[i], before[name])
+
+    def test_set_core_batch_size_resizes_existing_batch(self, backend):
+        qctn = QCTN.from_graph("-2-A-2-\n-2-B-2-", backend=backend)
+        qctn.set_core_batch_size(2)
+        first = {name: qctn.cores_weights[name].tensor.clone() for name in qctn.cores}
+        qctn.set_core_batch_size(5)
+        for name in qctn.cores:
+            tensor = qctn.cores_weights[name]
+            assert tensor.has_batch is True
+            assert tensor.shape[0] == 5
+            assert torch.allclose(tensor.tensor[0], first[name][0])
+            assert torch.allclose(tensor.tensor[1], first[name][1])
+            assert torch.allclose(tensor.tensor[2], first[name][0])
+            assert torch.allclose(tensor.tensor[3], first[name][1])
+            assert torch.allclose(tensor.tensor[4], first[name][0])

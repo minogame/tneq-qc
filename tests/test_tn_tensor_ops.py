@@ -160,6 +160,12 @@ class TestGradientProxy:
         assert t.requires_grad is True
         assert t.tensor.requires_grad is True
 
+    def test_requires_grad_ignored_for_fixed_identity(self):
+        t = TNTensor(torch.eye(2), is_fixed=True, fixed_kind="identity")
+        with pytest.warns(UserWarning, match="fixed TNTensor"):
+            t.requires_grad_(True)
+        assert t.requires_grad is False
+
     def test_requires_grad_chain(self):
         t = TNTensor(torch.ones(2))
         result = t.requires_grad_(True)

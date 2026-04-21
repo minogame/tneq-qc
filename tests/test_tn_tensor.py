@@ -73,6 +73,22 @@ class TestMetadata:
 # Scale helpers
 # --------------------------------------------------------------------------
 
+class TestFixedIdentity:
+    def test_set_ignored_with_warning(self):
+        t = TNTensor(torch.eye(2), is_fixed=True, fixed_kind="identity")
+        original = t.tensor.clone()
+        with pytest.warns(UserWarning, match="fixed TNTensor"):
+            t.set(torch.zeros_like(t.tensor))
+        assert torch.allclose(t.tensor, original)
+
+    def test_setitem_ignored_with_warning(self):
+        t = TNTensor(torch.eye(2), is_fixed=True, fixed_kind="identity")
+        original = t.tensor.clone()
+        with pytest.warns(UserWarning, match="fixed TNTensor"):
+            t[0, 0] = 7.0
+        assert torch.allclose(t.tensor, original)
+
+
 class TestScaleHelpers:
     def test_scale_to(self, t):
         original_value = t.tensor * t.scale
@@ -270,8 +286,9 @@ class TestBackendWrappers:
         assert not isinstance(result, TNTensor)
         assert torch.allclose(result, torch.full((3, 3), 6.0))
 
-    def test_backend_reshape_unwraps(self, backend, a):
-        """backend.reshape should auto-unwrap TNTensor and return raw tensor."""
+    def test_backend_reshape_preserves_tntensor(self, backend, a):
+        """backend.reshape should preserve TNTensor inputs and metadata."""
         result = backend.reshape(a, (9,))
-        assert not isinstance(result, TNTensor)
+        assert isinstance(result, TNTensor)
         assert result.shape == (9,)
+        assert result.scale == a.scale

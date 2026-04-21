@@ -5,7 +5,7 @@ Each class composes small modules (MPS, CircuitState, MeasureMatrix) via
 
 Example::
 
-    model = Quadratic(nqubits=3, bond_dim=4, backend=backend).auto_init()
+    model = Quadratic(QCTNHelper.mps(3, bond_dim=2, phys_dim=2), 2, backend=backend).auto_init(orthogonal=True)
     combined = model.build()       # ready-to-use combined QCTN
     data_fn = make_data_fn(gen, combined, batch_size=128, K=2)
 """
@@ -68,11 +68,17 @@ class MPS_with_Ref(QCTN):
         dtype=None,
         device=None,
         distribution: str = "gaussian",
+        orthogonal: bool = False,
     ) -> "MPS_with_Ref":
         """Initialize left, then wire right as conj-transpose references."""
         left = self._submodules["left"]
         right = self._submodules["right"]
-        left.auto_init(dtype=dtype, device=device, distribution=distribution)
+        left.auto_init(
+            dtype=dtype,
+            device=device,
+            distribution=distribution,
+            orthogonal=orthogonal,
+        )
         for name in left.cores:
             tensor = left.cores_weights[name]
             if isinstance(tensor, TNTensor):
@@ -108,18 +114,28 @@ class Quadratic(QCTN):
 
     Example::
 
-        model = Quadratic(nqubits=4, bond_dim=2, backend=backend).auto_init()
+        graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
+        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
         combined = model.build()
         # combined has: cs + mps + mx + mps_h + cs_t
     """
 
-    def __init__(self, nqubits: int, bond_dim: int, phys_dim: int = 2, backend=None):
+    def __init__(
+        self,
+        graph: str,
+        dim: int,
+        backend=None,
+    ):
+        if graph is None:
+            raise ValueError("Quadratic requires a non-None graph string.")
         super().__init__(graph=None, backend=backend, _defer_init=True)
-        self._nqubits = nqubits
-        self._phys_dim = phys_dim
-        self.register_module("circuit", CircuitState(nqubits, phys_dim, backend))
-        self.register_module("mps", MPS(nqubits, bond_dim, phys_dim, backend))
-        self.register_module("mx", MeasureMatrix(nqubits, phys_dim, backend))
+        tn_module = QCTN.from_graph(graph, backend=backend)
+        self._graph = graph
+        self._dim = dim
+        self._nqubits = tn_module.nqubits
+        self.register_module("circuit", CircuitState(self._nqubits, dim, backend))
+        self.register_module("tn", tn_module)
+        self.register_module("mx", MeasureMatrix(self._nqubits, dim, backend))
 
     def build(self) -> QCTN:
         """Return the 5-segment combined QCTN: cs + mps + mx + mps_h + cs_t.
@@ -131,17 +147,17 @@ class Quadratic(QCTN):
             Combined QCTN with all segments concatenated.
         """
         circuit = self._submodules['circuit']
-        mps = self._submodules['mps']
+        tn = self._submodules['tn']
         mx = self._submodules['mx']
 
-        mps_h = mps.hermit()
+        tn_h = tn.hermit()
         circuit_bra = circuit.bra()
 
         combined = QCTN.concat([
             ('cs', circuit),
-            ('mps', mps),
+            ('tn', tn),
             ('mx', mx),
-            ('mps_h', mps_h),
+            ('tn_h', tn_h),
             ('cs_t', circuit_bra),
         ])
         self._combined = combined

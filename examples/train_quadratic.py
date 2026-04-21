@@ -23,12 +23,11 @@ import matplotlib.pyplot as plt
 
 from tneq_qc import (
     QCTN, TNTensor, EngineCommon, BackendFactory, Quadratic,
-    DataGenerator, make_data_fn, create_optimizer,
+    DataGenerator, create_optimizer,
 )
 
 N_QUBITS   = 4
-BOND_DIM   = 2
-PHYS_DIM   = 2
+DIM        = 2
 BATCH_SIZE = 128
 N_STEPS    = 1000
 LR         = 0.01
@@ -36,6 +35,12 @@ LOG_EVERY  = 10
 N_SAMPLES  = 2000
 SAVE_DIR   = "checkpoints"
 ASSETS_DIR = "assets/quadratic"
+GRAPH      = "\n".join([
+    "-2-a--2-b-------------2-",
+    "-2-a--2-b--2-c--------2-",
+    "-2-------b--2-c--2-d--2-",
+    "-2-------------c--2-d--2-",
+])
 
 
 def init_circuit_01(qctn: QCTN, backend) -> QCTN:
@@ -46,9 +51,8 @@ def init_circuit_01(qctn: QCTN, backend) -> QCTN:
         n = 1
         for d in shape:
             n *= d
-        flat = torch.zeros(n, dtype=core.dtype)
-        for i in range(n):
-            flat[i] = float(i % 2)
+        flat = torch.zeros(n, dtype=backend.default_dtype)
+        flat[-1] = 1
         qctn.cores_weights[c] = backend.convert_to_tensor(flat.reshape(shape))
     return qctn
 
@@ -56,7 +60,7 @@ def init_circuit_01(qctn: QCTN, backend) -> QCTN:
 def compute_marginal_heatmap(engine, combined, data_gen, mx_core_names,
                              grid_size=100, bounds=(-3, 3)):
     """Compute marginal probability P(x_i) on a 1D grid for each qubit."""
-    K = PHYS_DIM
+    K = DIM
     x_min, x_max = bounds
     grid = np.linspace(x_min, x_max, grid_size).astype(np.float32)
 
@@ -121,17 +125,40 @@ def estimate_kl_divergence(train_samples, model_samples, n_bins=50, bounds=(-3, 
     return kl_per_dim
 
 
+def init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Fill each measure core with an identity matrix placeholder."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        qctn.cores_weights[core_name] = backend.reshape(core, input_shape + output_shape)
+    return qctn
+
+
 def main():
     device = os.environ.get('TNEQ_DEVICE', 'cpu')
     backend  = BackendFactory.create_backend('pytorch', device=device, dtype='complex64')
     engine   = EngineCommon(backend=backend, strategy_mode="full")
-    data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
+    data_gen = DataGenerator(backend, mx_K=DIM)
 
     # Build model
-    model = Quadratic(nqubits=N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM,
-                      backend=backend).auto_init()
+    model = Quadratic(
+        GRAPH,
+        DIM,
+        backend=backend,
+    )
+    model._submodules['tn'].auto_init(orthogonal=True)
+    model._submodules['circuit'].auto_init(orthogonal=False)
     init_circuit_01(model._submodules['circuit'], backend)
-    model._submodules['mps'].requires_grad_(True)
+    init_measure_identity(model._submodules['mx'], backend)
+    model._submodules['tn'].requires_grad_(True)
     combined = model.build()
 
     print(f"Device: {device}")
@@ -145,11 +172,15 @@ def main():
     
     # Train
     optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
-    data_fn = make_data_fn(data_gen, combined, batch_size=BATCH_SIZE, K=PHYS_DIM)
+    mx_core_names = model.mx_core_names
     loss_history = []
 
     for step in range(1, N_STEPS + 1):
-        data_fn(step)
+        x = np.random.uniform(-1.0, 1.0, size=(BATCH_SIZE, N_QUBITS)).astype(np.float32)
+        Mx_list, _ = data_gen.generate(x, K=DIM, ret_type="TNTensor")
+        for i, name in enumerate(mx_core_names):
+            combined[name] = Mx_list[i]
+
         loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
         optimizer.step(list(grads))
         lv = float(loss_val)
@@ -163,10 +194,10 @@ def main():
     # Save model (save the mps submodule which has the trainable params)
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
-    save_path = os.path.join(SAVE_DIR, "quadratic_mps.safetensors")
-    model._submodules['mps'].save_cores(save_path, metadata={
+    save_path = os.path.join(SAVE_DIR, "quadratic_tn.safetensors")
+    model._submodules['tn'].save_cores(save_path, metadata={
         'n_qubits': str(N_QUBITS),
-        'bond_dim': str(BOND_DIM),
+        'dim': str(DIM),
         'n_steps': str(N_STEPS),
         'final_loss': f"{loss_history[-1]:.6f}",
     })
@@ -175,7 +206,6 @@ def main():
     # === Validation ===
     print("\n=== Validation ===")
 
-    mx_core_names = model.mx_core_names
     print(f"mx_core_names: {mx_core_names}")
 
     # 1. Marginal probability heatmap
@@ -265,14 +295,19 @@ def main():
 
     # 4. Reload validation
     print("\n=== Reload Validation ===")
-    model_val = Quadratic(nqubits=N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM,
-                          backend=backend).auto_init()
+    model_val = Quadratic(
+        GRAPH,
+        DIM,
+        backend=backend,
+    )
+    model_val._submodules['circuit'].auto_init(orthogonal=False)
     init_circuit_01(model_val._submodules['circuit'], backend)
-    model_val._submodules['mps'].load_cores(save_path)
+    init_measure_identity(model_val._submodules['mx'], backend)
+    model_val._submodules['tn'].load_cores(save_path)
     combined_val = model_val.build()
 
     # Inject same identity mx and compare contraction result
-    ident = TNTensor(backend.eye(PHYS_DIM))
+    ident = TNTensor(backend.eye(DIM))
     for name in mx_core_names:
         combined[name] = ident
         combined_val[name] = ident

@@ -44,10 +44,10 @@ def main():
 
     # Teacher (fixed)
     graph = "\n".join(f"-{PHYS_DIM}-{chr(ord('A') + i)}-{PHYS_DIM}-" for i in range(N_QUBITS))
-    teacher = QCTN(graph, backend=backend).auto_init()
+    teacher = QCTN(graph, backend=backend).auto_init(orthogonal=True)
 
     # Student (trainable, same structure)
-    student = QCTN(graph, backend=backend).auto_init()
+    student = QCTN(graph, backend=backend).auto_init(orthogonal=True)
     student.requires_grad_(True)
 
     # Combined with trace
@@ -87,7 +87,7 @@ def main():
 
     # Validation: reload and compare
     print("\n=== Validation ===")
-    student_loaded = QCTN(graph, backend=backend).auto_init()
+    student_loaded = QCTN(graph, backend=backend)
     student_loaded.load_cores(SAVE_PATH)
 
     combined_val = QCTN.concat([('u', student_loaded), ('t', teacher)])

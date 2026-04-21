@@ -12,6 +12,43 @@ from ._qctn_contractor import QCTNContractorMixin, TensorSide  # TensorSide re-e
 # Public re-export so ``from tneq_qc.core.qctn import TensorSide`` keeps working
 __all__ = ["QCTN", "TensorSide"]
 
+_FULL_CORES = tuple(opt_einsum.get_symbol(i) for i in range(10000))
+_FULL_CORE_SET = set(_FULL_CORES)
+_CORE2IDX = {sym: idx for idx, sym in enumerate(_FULL_CORES)}
+
+
+def _preprocess_graph_string(graph: str):
+    """Inject fixed identity cores for empty qubit lines."""
+    if graph == "":
+        return graph, {}
+
+    raw_lines = graph.splitlines()
+    if not raw_lines:
+        return graph, {}
+
+    used_symbols = {ch for ch in graph if ch in _FULL_CORE_SET}
+    next_symbol_idx = 0
+    injected_identity_cores = {}
+    processed_lines = []
+
+    for qubit_idx, raw_line in enumerate(raw_lines):
+        stripped = raw_line.strip()
+        has_core = any(ch in _FULL_CORE_SET for ch in stripped)
+        if has_core:
+            processed_lines.append(stripped)
+            continue
+
+        while _FULL_CORES[next_symbol_idx] in used_symbols:
+            next_symbol_idx += 1
+        sym = _FULL_CORES[next_symbol_idx]
+        used_symbols.add(sym)
+        next_symbol_idx += 1
+
+        processed_lines.append(f"-2-{sym}-2-")
+        injected_identity_cores[sym] = qubit_idx
+
+    return "\n".join(processed_lines), injected_identity_cores
+
 
 class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
     """
@@ -44,15 +81,14 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
 
         Args:
             graph (str | None): ASCII graph string defining the tensor network
-                topology.  Pass ``None`` to create a composite module with no
+                topology. Pass ``None`` to create a composite module with no
                 own core tensors (submodules are registered via
                 :meth:`register_module`).
-            backend: Compute backend instance (e.g. BackendPyTorch).  Required
+            backend: Compute backend instance (e.g. BackendPyTorch). Required
                 for :meth:`auto_init`; may be ``None`` for structure-only use.
-            _defer_init (bool): Internal keyword-only flag.  When ``True``,
+            _defer_init (bool): Internal keyword-only flag. When ``True``,
                 skip the automatic :meth:`_init_cores` call even when
-                *backend* is provided.  Used by small-module subclasses that
-                want to control initialization timing via :meth:`auto_init`.
+                *backend* is provided.
         """
         # ---- Composite mode: no graph, act as a pure container ----
         if graph is None:
@@ -60,6 +96,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             self.nqubits = 0
             self.qubit_indices = []
             self.graph = None
+            self._source_graph = None
             self.tn_graph = None
             self.cores = []
             self.ncores = 0
@@ -70,31 +107,41 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             self.core_names: dict = {}
             self.trace_qubits: set = set()
             self._submodules: dict = {}
+            self._fixed_identity_cores: dict = {}
+            self._core_batch_size = None
             return
 
+        processed_graph, injected_identity_cores = _preprocess_graph_string(graph)
+
         # ---- Normal graph-based mode ----
-        self.qubits = graph.strip().splitlines()
+        self.qubits = processed_graph.splitlines() if processed_graph else []
         self.nqubits = len(self.qubits)
         self.qubit_indices = list(range(self.nqubits))
 
-        self.graph = graph
-        self.tn_graph = TNGraph(graph, self.nqubits)
+        self.graph = processed_graph
+        self._source_graph = graph
+        self._fixed_identity_cores = injected_identity_cores
+        self.tn_graph = TNGraph(processed_graph, self.nqubits)
 
-        full_cores = set(opt_einsum.get_symbol(i) for i in range(10000))
-        core2idx = {opt_einsum.get_symbol(i): i for i in range(10000)}
-        self.cores = sorted(set(c for c in graph if c in full_cores), key=lambda x: core2idx[x])
+        self.cores = sorted(
+            set(c for c in processed_graph if c in _FULL_CORE_SET),
+            key=lambda x: _CORE2IDX[x],
+        )
         self.ncores = len(self.cores)
 
         self.adjacency_table = []
         self._circuit_to_adjacency()
 
-        self.graph = graph
         self.backend = backend
         self._loaded_metadata = None
         self.cores_weights: dict = {}
-        self.core_names: dict = {s: s for s in self.cores}
+        self.core_names: dict = {
+            s: (f"identity.q{injected_identity_cores[s]}" if s in injected_identity_cores else s)
+            for s in self.cores
+        }
         self.trace_qubits: set = set()
         self._submodules: dict = {}
+        self._core_batch_size = None
 
         if not _defer_init and backend is not None:
             self._init_cores()
@@ -156,49 +203,45 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         """Set a core tensor by readable name or symbol.
 
         If *value* is a ``TNTensor``, uses inplace ``set()`` to preserve
-        Python object identity (so hermit views remain valid).  Otherwise
+        Python object identity (so hermit views remain valid). Otherwise
         replaces the entry in ``cores_weights`` directly.
 
         Args:
             key: Readable name (e.g. ``'mx.a'``) or einsum symbol.
             value: New tensor (TNTensor or raw tensor).
         """
-        # Resolve to symbol.
         if key in self.cores_weights:
             sym = key
         else:
             sym = self._symbol_for_name(key)
 
         existing = self.cores_weights[sym]
+        if isinstance(existing, TNTensor) and existing.is_fixed:
+            warnings.warn(
+                f"Core '{self.core_names.get(sym, sym)}' is fixed ({existing.fixed_kind}) and cannot be overwritten; ignoring assignment.",
+                stacklevel=2,
+            )
+            return
+
         if isinstance(existing, TNTensor) and isinstance(value, TNTensor):
             existing.set(value.tensor, value.scale, has_batch=value.has_batch)
         else:
             self.cores_weights[sym] = value
-        """Pretty-print tensor network structure based on adjacency_table.
 
-        Uses linked-list logic to trace cores on each qubit from start to end,
-        handling both boundary-connected and internal-only cores.
-
-        Example output:
-            -2-A-5-B-----3-
-            -2-----B-6-C-2-
-        """
+    def to_graph_string(self) -> str:
+        """Render the current adjacency table back into an ASCII graph string."""
         if not self.qubits:
             return f"QCTN(composite, submodules={list(self._submodules.keys())})"
         if not self.cores:
             return "QCTN(empty)"
 
-        # Helper function to check if neighbor is boundary
         def is_boundary(neighbor_name):
             return neighbor_name is None or neighbor_name == ''
 
-        # Build a map: core_name -> core_info for quick lookup
         core_map = {info['core_name']: info for info in self.adjacency_table}
 
-        # Build output lines by tracing each qubit
         lines = []
         for qubit_idx in range(self.nqubits):
-            # Find all cores that touch this qubit
             cores_on_qubit = []
             for core_info in self.adjacency_table:
                 has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
@@ -206,14 +249,10 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 if has_in_edge or has_out_edge:
                     cores_on_qubit.append(core_info['core_name'])
 
-            # If no cores on this qubit, output empty line
             if not cores_on_qubit:
                 lines.append("-")
                 continue
 
-            # Find start cores (two cases):
-            # 1. Has input from boundary on this qubit
-            # 2. Has no input edge but has output edge on this qubit
             start_cores = []
             for core_name in cores_on_qubit:
                 core_info = core_map[core_name]
@@ -223,13 +262,9 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 )
                 has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
                 has_out_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['out_edge_list'])
-
                 if has_in_from_boundary or (not has_in_edge and has_out_edge):
                     start_cores.append(core_name)
 
-            # Find end cores (two cases):
-            # 1. Has output to boundary on this qubit
-            # 2. Has input edge but no output edge on this qubit
             end_cores = []
             for core_name in cores_on_qubit:
                 core_info = core_map[core_name]
@@ -239,34 +274,29 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 )
                 has_in_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['in_edge_list'])
                 has_out_edge = any(e['qubit_idx'] == qubit_idx for e in core_info['out_edge_list'])
-
                 if has_out_to_boundary or (has_in_edge and not has_out_edge):
                     end_cores.append(core_name)
 
-            # Validate start and end cores
             if len(start_cores) == 0:
                 print(f"WARNING: No start core found on qubit {qubit_idx}")
                 lines.append("-")
                 continue
-            elif len(start_cores) > 1:
+            if len(start_cores) > 1:
                 print(f"WARNING: Multiple start cores found on qubit {qubit_idx}: {start_cores}")
 
             if len(end_cores) == 0:
                 print(f"WARNING: No end core found on qubit {qubit_idx}")
                 lines.append("-")
                 continue
-            elif len(end_cores) > 1:
+            if len(end_cores) > 1:
                 print(f"WARNING: Multiple end cores found on qubit {qubit_idx}: {end_cores}")
 
-            # Use the first start and end cores
             start_core = start_cores[0]
             end_core = end_cores[0]
 
-            # Trace the chain from start to end
             parts = []
             current_core = start_core
 
-            # Get left boundary dimension
             core_info = core_map[current_core]
             left_dim = None
             for in_edge in core_info['in_edge_list']:
@@ -279,7 +309,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             else:
                 parts.append("-")
 
-            # Trace the chain
             visited = set()
             while current_core is not None:
                 if current_core in visited:
@@ -289,9 +318,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
 
                 parts.append(current_core)
 
-                # If we reached the end core, finish
                 if current_core == end_core:
-                    # Get right boundary dimension
                     core_info = core_map[current_core]
                     right_dim = None
                     for out_edge in core_info['out_edge_list']:
@@ -305,11 +332,9 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                         parts.append("-")
                     break
 
-                # Find next core
                 core_info = core_map[current_core]
                 next_core = None
                 connection_dim = None
-
                 for out_edge in core_info['out_edge_list']:
                     if out_edge['qubit_idx'] == qubit_idx and not is_boundary(out_edge['neighbor_name']):
                         next_core = out_edge['neighbor_name']
@@ -320,7 +345,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                     print(f"WARNING: Cannot form chain on qubit {qubit_idx}: {current_core} has no next core but end_core is {end_core}")
                     break
 
-                # Validate connection
                 next_core_info = core_map[next_core]
                 valid_connection = False
                 for in_edge in next_core_info['in_edge_list']:
@@ -333,7 +357,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 if not valid_connection:
                     print(f"WARNING: Invalid connection on qubit {qubit_idx}: {current_core} -> {next_core}")
 
-                # Add connection dimension
                 if connection_dim is not None:
                     parts.append(f"-{connection_dim}-")
                 else:
@@ -344,7 +367,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             lines.append(''.join(parts))
 
         return '\n'.join(lines)
-
     # ================================================================
     # Parameter collection (Phase 3.0)
     # ================================================================
@@ -407,6 +429,79 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         for t in self.cores_weights.values():
             t.requires_grad_(requires_grad)
         return self
+
+    @staticmethod
+    def _batch_unsqueeze(raw):
+        if hasattr(raw, 'unsqueeze'):
+            return raw.unsqueeze(0)
+        try:
+            import jax.numpy as jnp
+            return jnp.expand_dims(raw, axis=0)
+        except ImportError:
+            import numpy as np
+            return np.expand_dims(raw, axis=0)
+
+    @staticmethod
+    def _batch_tile(raw, reps: int):
+        if hasattr(raw, 'is_leaf') or hasattr(raw, 'is_cuda'):
+            return raw.repeat(reps, *([1] * (raw.ndim - 1)))
+        try:
+            import jax.numpy as jnp
+            return jnp.tile(raw, (reps,) + (1,) * (raw.ndim - 1))
+        except ImportError:
+            import numpy as np
+            return np.tile(raw, (reps,) + (1,) * (raw.ndim - 1))
+
+    def add_core_batch_size(self, batch_size: int):
+        """Declare and, when possible, materialize a batch axis for all cores."""
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}.")
+
+        self._core_batch_size = int(batch_size)
+
+        for core_name in self.cores:
+            tensor = self.cores_weights.get(core_name)
+            if tensor is None:
+                continue
+            if not isinstance(tensor, TNTensor):
+                tensor = TNTensor(tensor)
+
+            raw = tensor.tensor.detach() if hasattr(tensor.tensor, 'detach') else tensor.tensor
+            raw = raw.clone() if hasattr(raw, 'clone') else raw
+            requires_grad = tensor.requires_grad and not tensor.is_fixed
+
+            if tensor.has_batch:
+                current_batch = int(raw.shape[0])
+                if current_batch == batch_size:
+                    new_raw = raw
+                elif current_batch > batch_size:
+                    new_raw = raw[:batch_size]
+                else:
+                    reps = (batch_size + current_batch - 1) // current_batch
+                    new_raw = self._batch_tile(raw, reps)[:batch_size]
+            else:
+                expanded = self._batch_unsqueeze(raw)
+                new_raw = self._batch_tile(expanded, batch_size)
+
+            new_tensor = TNTensor(
+                new_raw,
+                scale=tensor.scale,
+                has_batch=True,
+                is_fixed=tensor.is_fixed,
+                fixed_kind=tensor.fixed_kind,
+            )
+            if requires_grad:
+                new_tensor.requires_grad_(True)
+            self.cores_weights[core_name] = new_tensor
+
+        for submodule in self._submodules.values():
+            if hasattr(submodule, 'add_core_batch_size'):
+                submodule.add_core_batch_size(batch_size)
+        return self
+
+    def set_core_batch_size(self, batch_size: int):
+        """Backward-compatible alias for :meth:`add_core_batch_size`."""
+        return self.add_core_batch_size(batch_size)
 
     def bra(self):
         """Return bra (conjugate) version of this QCTN.
@@ -876,45 +971,99 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             for i, old in enumerate(qctn2.cores)
         }
 
-        remapped1 = QCTN._remap_graph(qctn1.qubits, core_map1)
-        remapped2 = QCTN._remap_graph(qctn2.qubits, core_map2)
-
-        pad_width1 = max(len(l) for l in remapped1) - 3
-        pad_width2 = max(len(l) for l in remapped2) - 3
-
-        new_lines = []
-        for qi in range(max_qubits):
-            has_l1 = qi < n1
-            has_l2 = qi < n2
-
-            l1 = remapped1[qi] if has_l1 else ("-" * pad_width1)
-            l2 = remapped2[qi] if has_l2 else ("-" * pad_width2)
-
-            m1 = re.search(r'-\d+-$', l1)
-            dim_l1 = m1.group() if has_l1 else ""
-            stripped_l1 = l1[:m1.start()] if has_l1 else l1
-
-            m2 = re.match(r'^-\d+-', l2)
-            dim_l2 = (m2.group() if m2 else "") if has_l2 else ""
-            stripped_l2 = (l2[m2.end():] if m2 else l2) if has_l2 else l2
-
-            if has_l1 and has_l2:
-                merged = stripped_l1 + dim_l1 + stripped_l2
-            elif has_l1:
-                dim_l2 = '---'
-                merged = stripped_l1 + stripped_l2 + dim_l1
-            else:
-                dim_l1 = '---'
-                merged = dim_l2 + stripped_l1 + stripped_l2
-
-            new_lines.append(merged)
-
-        new_graph = "\n".join(new_lines)
-
         backend = qctn1.backend if qctn1.backend is not None else qctn2.backend
-        new_qctn = QCTN(new_graph, backend=backend)
+        new_qctn = QCTN(graph=None, backend=backend, _defer_init=True)
+        new_qctn.nqubits = max_qubits
+        new_qctn.qubit_indices = list(range(max_qubits))
+        new_qctn.cores = list(new_symbols)
+        new_qctn.ncores = total_cores
+        new_qctn.trace_qubits = set(getattr(qctn1, 'trace_qubits', set())) | set(getattr(qctn2, 'trace_qubits', set()))
+        new_qctn._submodules = {}
+        new_qctn._loaded_metadata = None
 
-        # Copy weights (shallow — shares TNTensor references).
+        entry_map1 = {entry['core_name']: entry for entry in qctn1.adjacency_table}
+        entry_map2 = {entry['core_name']: entry for entry in qctn2.adjacency_table}
+
+        def _remap_edge(edge, core_map):
+            new_edge = edge.copy()
+            old_neighbor = edge.get('neighbor_name', '')
+            if old_neighbor:
+                new_edge['neighbor_name'] = core_map[old_neighbor]
+            return new_edge
+
+        adjacency_table = []
+        for old_name in qctn1.cores:
+            entry = entry_map1[old_name]
+            adjacency_table.append({
+                'core_idx': len(adjacency_table),
+                'core_name': core_map1[old_name],
+                'in_edge_list': [_remap_edge(edge, core_map1) for edge in entry['in_edge_list']],
+                'out_edge_list': [_remap_edge(edge, core_map1) for edge in entry['out_edge_list']],
+                'input_shape': list(entry['input_shape']),
+                'output_shape': list(entry['output_shape']),
+                'input_dim': entry['input_dim'],
+                'output_dim': entry['output_dim'],
+            })
+        for old_name in qctn2.cores:
+            entry = entry_map2[old_name]
+            adjacency_table.append({
+                'core_idx': len(adjacency_table),
+                'core_name': core_map2[old_name],
+                'in_edge_list': [_remap_edge(edge, core_map2) for edge in entry['in_edge_list']],
+                'out_edge_list': [_remap_edge(edge, core_map2) for edge in entry['out_edge_list']],
+                'input_shape': list(entry['input_shape']),
+                'output_shape': list(entry['output_shape']),
+                'input_dim': entry['input_dim'],
+                'output_dim': entry['output_dim'],
+            })
+
+        left_entries = adjacency_table[:qctn1.ncores]
+        right_entries = adjacency_table[qctn1.ncores:]
+
+        def _find_boundary_edge(entries, qubit_idx, direction):
+            for entry in entries:
+                edge_list = entry[f'{direction}_edge_list']
+                for edge in edge_list:
+                    if edge['qubit_idx'] == qubit_idx and edge.get('neighbor_name', '') == '':
+                        return entry, edge
+            return None, None
+
+        for qubit_idx in range(min(n1, n2)):
+            left_entry, left_edge = _find_boundary_edge(left_entries, qubit_idx, 'out')
+            right_entry, right_edge = _find_boundary_edge(right_entries, qubit_idx, 'in')
+
+            if left_edge is None or right_edge is None:
+                continue
+            if left_edge['edge_rank'] != right_edge['edge_rank']:
+                raise ValueError(
+                    f"Cannot concat qubit {qubit_idx}: boundary rank mismatch "
+                    f"{left_edge['edge_rank']} != {right_edge['edge_rank']}."
+                )
+
+            left_edge['neighbor_name'] = right_entry['core_name']
+            right_edge['neighbor_name'] = left_entry['core_name']
+
+        dict_core2idx = {core_name: idx for idx, core_name in enumerate(new_qctn.cores)}
+        for entry in adjacency_table:
+            entry['core_idx'] = dict_core2idx[entry['core_name']]
+            for edge in entry['in_edge_list'] + entry['out_edge_list']:
+                neighbor_name = edge.get('neighbor_name', '')
+                edge['neighbor_idx'] = dict_core2idx[neighbor_name] if neighbor_name else -1
+            entry['input_shape'] = [edge['edge_rank'] for edge in entry['in_edge_list']]
+            entry['output_shape'] = [edge['edge_rank'] for edge in entry['out_edge_list']]
+            in_dim = 1
+            for rank in entry['input_shape']:
+                in_dim *= rank
+            out_dim = 1
+            for rank in entry['output_shape']:
+                out_dim *= rank
+            entry['input_dim'] = in_dim
+            entry['output_dim'] = out_dim
+
+        new_qctn.adjacency_table = adjacency_table
+        new_qctn.dict_core2idx = dict_core2idx
+
+        new_qctn.cores_weights = {}
         for old_name, new_name in core_map1.items():
             if old_name in qctn1.cores_weights:
                 new_qctn.cores_weights[new_name] = qctn1.cores_weights[old_name]
@@ -922,10 +1071,9 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             if old_name in qctn2.cores_weights:
                 new_qctn.cores_weights[new_name] = qctn2.cores_weights[old_name]
 
-        # Build core_names: symbol → readable name.
+        new_qctn.core_names = {}
         q1_names = getattr(qctn1, 'core_names', {s: s for s in qctn1.cores})
         q2_names = getattr(qctn2, 'core_names', {s: s for s in qctn2.cores})
-
         for old, new in core_map1.items():
             orig_name = q1_names.get(old, old)
             new_qctn.core_names[new] = (
@@ -937,8 +1085,23 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 f"{prefix2}.{orig_name}" if prefix2 is not None else orig_name
             )
 
-        return new_qctn
+        remapped_fixed = {}
+        for old, new in core_map1.items():
+            if old in getattr(qctn1, '_fixed_identity_cores', {}):
+                remapped_fixed[new] = qctn1._fixed_identity_cores[old]
+        for old, new in core_map2.items():
+            if old in getattr(qctn2, '_fixed_identity_cores', {}):
+                remapped_fixed[new] = qctn2._fixed_identity_cores[old]
+        new_qctn._fixed_identity_cores = remapped_fixed
 
+        new_qctn.qubits = ['-'] * max_qubits
+        new_graph = new_qctn.to_graph_string()
+        new_qctn.graph = new_graph
+        new_qctn._source_graph = new_graph
+        new_qctn.qubits = new_graph.splitlines()
+        new_qctn.tn_graph = TNGraph(new_graph, max_qubits)
+
+        return new_qctn
     @staticmethod
     def merge(qctn1, qctn2):
         """.. deprecated:: Use :meth:`concat` instead."""
@@ -1044,6 +1207,8 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
 
         cloned_qctn.core_names = dict(getattr(self, 'core_names', {}))
         cloned_qctn.trace_qubits = set(getattr(self, 'trace_qubits', set()))
+        cloned_qctn._fixed_identity_cores = dict(getattr(self, '_fixed_identity_cores', {}))
+        cloned_qctn._source_graph = getattr(self, '_source_graph', self.graph)
 
         # Clone submodules
         cloned_qctn._submodules = {}
@@ -1081,6 +1246,8 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         hermit_qctn.cores = self.cores.copy()
         hermit_qctn.ncores = self.ncores
         hermit_qctn.graph = self.graph
+        hermit_qctn._source_graph = getattr(self, '_source_graph', self.graph)
+        hermit_qctn._fixed_identity_cores = dict(getattr(self, '_fixed_identity_cores', {}))
         hermit_qctn.tn_graph = self.tn_graph
 
         # Reverse adjacency_table: swap in_edge_list ↔ out_edge_list for every
@@ -1110,14 +1277,24 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             })
         hermit_qctn.adjacency_table = hermit_table
 
-        # Apply hermit to each core tensor
+        # Apply hermit to each core tensor. Swap the full output block with
+        # the full input block, not just the last two axes.
         hermit_qctn.cores_weights = {}
+        entry_map = {entry['core_name']: entry for entry in self.adjacency_table}
         for core_name, tensor in self.cores_weights.items():
+            entry = entry_map[core_name]
+            n_in = len(entry['input_shape'])
+            n_out = len(entry['output_shape'])
+            offset = 1 if isinstance(tensor, TNTensor) and tensor.has_batch else 0
+            axes = list(range(offset + n_in, offset + n_in + n_out)) + list(range(offset, offset + n_in))
+            if offset:
+                axes = [0] + axes
+
             if isinstance(tensor, TNTensor):
-                hermit_qctn.cores_weights[core_name] = tensor.hermit()
+                hermit_qctn.cores_weights[core_name] = tensor.hermit(axes=axes)
             else:
                 # Wrap raw tensor first
-                hermit_qctn.cores_weights[core_name] = TNTensor(tensor).hermit()
+                hermit_qctn.cores_weights[core_name] = TNTensor(tensor).hermit(axes=axes)
 
         hermit_qctn.core_names = dict(getattr(self, 'core_names', {}))
 
