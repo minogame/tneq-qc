@@ -1,6 +1,6 @@
 # tneq-qc
 
-Tensor Network Equation for Quantum Computing — a lightweight library for building, contracting, and training tensor network models on quantum circuit topologies.
+Tensor Network Engine toward Quantum (Quantum Circuit) — a lightweight library for building, contracting, and training tensor network models on quantum circuit topologies.
 
 ## Overview
 
@@ -15,7 +15,7 @@ Tensor Network Equation for Quantum Computing — a lightweight library for buil
 
 ## Architecture
 
-```
+```bash
 tneq_qc/
 ├── core/               # Fundamental building blocks
 │   ├── qctn.py         # QCTN class — graph parsing, core management, concat
@@ -203,12 +203,12 @@ Strategy modes: `'fast'` (einsum only), `'balanced'` (einsum + MPS chain), `'ful
 Built-in losses, usable by name:
 
 | Name | Description |
-|------|-------------|
+| :--- | :--- |
 | `'diagonal_mse'` | Reshape → diagonal → MSE (default) |
 | `'mse'` | Mean Squared Error |
 | `'mae'` | Mean Absolute Error |
 | `'nll'` | Negative Log-Likelihood |
-| `'fidelity'` | Quantum fidelity `−|⟨result\|target⟩|²` |
+| `'fidelity'` | Quantum fidelity $- \vert \langle \text{result} \vert \text{target} \rangle \vert^2$ |
 
 Custom losses via decorator:
 
@@ -282,6 +282,7 @@ loss_val, grads = engine.contract_for_gradient(combined, target=1, loss='nll')
 ```
 
 Launch with torchrun:
+
 ```bash
 torchrun --nproc_per_node=2 examples/train_dist.py
 ```
@@ -313,7 +314,7 @@ Test coverage includes: QCTN construction, graph parsing, TNTensor operations, c
 
 ## Project Structure
 
-```
+```bash
 tneq-qc/
 ├── tneq_qc/            # Library source
 ├── examples/           # Training scripts (runnable)
@@ -329,6 +330,7 @@ tneq-qc/
 See `requirements.txt` for the full dependency list.
 
 Core dependencies:
+
 - Python ≥ 3.10
 - PyTorch ≥ 2.0
 - opt-einsum
@@ -337,20 +339,21 @@ Core dependencies:
 - tqdm
 
 Optional:
+
 - JAX (for JAX backend)
 - torchvision (for MNIST example)
 - matplotlib (for visualization)
 
 ## License
 
-TBD
+MIT License
 
 ## Citation
 
 ```bibtex
-@software{tneq_qc,
-  title  = {tneq-qc: Tensor Network Equation for Quantum Computing},
-  author = {Wang, Yifeng},
+@software{wang2025tneq,
+  title  = {tneq_qc: Tensor Network Engine toward Quantum: Yet Another Software But More Flexiable, Learnable, and Distributabl},
+  author = {Wang, Yifeng and Li, Chao and Sun, Zhun},
   year   = {2025},
   url    = {https://github.com/minogame/tneq-qc}
 }
