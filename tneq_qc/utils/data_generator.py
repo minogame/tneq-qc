@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import numpy as np
-from typing import Optional
+from typing import Optional, Sequence, Dict, Any
 
 
 class DataGenerator:
@@ -256,6 +256,85 @@ class DataGenerator:
             Mx_list.append(tmp)
 
         return Mx_list, out
+
+
+class DiscreteDataGenerator:
+    """Generate diagonal projectors for discrete values.
+
+    For ``values=(0, 1)`` and ``K=4``, value ``0`` maps to
+    ``diag([1, 1, 0, 0])`` and value ``1`` maps to
+    ``diag([0, 0, 1, 1])``.
+    """
+
+    def __init__(self, backend, values: Sequence[Any] = (0, 1), mx_K: int = 2):
+        if not values:
+            raise ValueError("values must contain at least one discrete value")
+        if mx_K <= 0:
+            raise ValueError(f"mx_K must be positive, got {mx_K}")
+
+        self.backend = backend
+        self.values = tuple(values)
+        self.mx_K = int(mx_K)
+        self._value_to_index: Dict[Any, int] = {
+            value: idx for idx, value in enumerate(self.values)
+        }
+        self._table_np = self._build_projector_table(self.mx_K)
+
+    def _build_projector_table(self, K: int) -> np.ndarray:
+        n_values = len(self.values)
+        table = np.zeros((n_values, K, K), dtype=np.float32)
+        boundaries = np.linspace(0, K, n_values + 1, dtype=int)
+        for idx in range(n_values):
+            start, end = boundaries[idx], boundaries[idx + 1]
+            if start == end:
+                raise ValueError(
+                    f"K={K} is too small to assign a projector slice to "
+                    f"{n_values} values"
+                )
+            table[idx, start:end, start:end] = np.eye(end - start, dtype=np.float32)
+        return table
+
+    def projector_table(self, K: Optional[int] = None) -> np.ndarray:
+        """Return a copy of the value-to-projector table."""
+        if K is None or K == self.mx_K:
+            return self._table_np.copy()
+        return self._build_projector_table(int(K))
+
+    def generate(self, x, K: Optional[int] = None, ret_type: str = 'tensor'):
+        """Generate discrete measurement matrices.
+
+        Args:
+            x: Discrete batch with shape ``[B, D]``.
+            K: Matrix dimension. Defaults to ``self.mx_K``.
+            ret_type: ``'tensor'`` or ``'TNTensor'``.
+        """
+        from ..core.tn_tensor import TNTensor
+
+        if K is None:
+            K = self.mx_K
+            table = self._table_np
+        else:
+            K = int(K)
+            table = self._table_np if K == self.mx_K else self._build_projector_table(K)
+
+        x_tt = self.backend.convert_to_tensor(x)
+        x_np = np.asarray(self.backend.tensor_to_numpy(x_tt).real)
+        if x_np.ndim == 1:
+            x_np = x_np[:, None]
+
+        index_np = np.empty(x_np.shape, dtype=np.int64)
+        for value, idx in self._value_to_index.items():
+            index_np[x_np == value] = idx
+        if not np.all(np.isin(x_np, np.asarray(self.values))):
+            raise ValueError(f"x contains values outside {self.values}")
+
+        Mx_list = []
+        for dim in range(index_np.shape[1]):
+            mx = self.backend.convert_to_tensor(table[index_np[:, dim]])
+            if ret_type == "TNTensor":
+                mx = TNTensor(mx, has_batch=True)
+            Mx_list.append(mx)
+        return Mx_list, None
 
 
 class CustomDataGenerator:

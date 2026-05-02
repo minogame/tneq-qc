@@ -40,7 +40,7 @@ def get_val(result):
 def main():
     device = os.environ.get('TNEQ_DEVICE', 'cpu')
     backend = BackendFactory.create_backend('pytorch', device=device, dtype='float32')
-    engine = EngineCommon(backend=backend, strategy_mode="full")
+    engine = EngineCommon(backend=backend, strategy="row_priority")
 
     # Teacher (fixed)
     graph = "\n".join(f"-{PHYS_DIM}-{chr(ord('A') + i)}-{PHYS_DIM}-" for i in range(N_QUBITS))

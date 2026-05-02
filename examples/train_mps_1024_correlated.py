@@ -1,4 +1,4 @@
-"""Quadratic training: 1024-qubit MPS with correlated Gaussian data.
+"""Born machine training: 1024-qubit MPS with correlated Gaussian data.
 
 Structure: circuit + mps + mx + mps_h + circuit_bra
 Data: MultivariateNormal with tridiagonal covariance (nearest-neighbor correlation 0.2)
@@ -18,7 +18,7 @@ import torch
 import numpy as np
 
 from tneq_qc import (
-    QCTN, BackendFactory, EngineCommon, Quadratic,
+    QCTN, BackendFactory, EngineCommon, BornMachine,
     DataGenerator, create_optimizer,
 )
 from tneq_qc.utils.graph_generators import QCTNHelper
@@ -90,19 +90,15 @@ def init_measure_identity(qctn: QCTN, backend) -> QCTN:
 
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-    engine  = EngineCommon(backend=backend, strategy_mode='full')
+    engine  = EngineCommon(backend=backend, strategy='row_priority')
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
     # Build model
-    print(f"Building Quadratic model: {N_QUBITS} qubits, bond_dim={BOND_DIM}")
+    print(f"Building BornMachine model: {N_QUBITS} qubits, bond_dim={BOND_DIM}")
     t0 = time.time()
     graph = QCTNHelper.mps(N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM)
-    model = Quadratic(graph, PHYS_DIM, backend=backend)
-    model._submodules['mps'].auto_init(orthogonal=True)
-    model._submodules['circuit'].auto_init(orthogonal=False)
-    init_circuit_01(model._submodules['circuit'], backend)
-    init_measure_identity(model._submodules['mx'], backend)
-    model._submodules['mps'].requires_grad_(True)
+    model = BornMachine(graph, PHYS_DIM, backend=backend).auto_init(orthogonal=True)
+    model._submodules['tn'].requires_grad_(True)
     combined = model.build()
     t_init = time.time() - t0
 
@@ -151,7 +147,7 @@ def main():
     # Save model
     os.makedirs(SAVE_DIR, exist_ok=True)
     save_path = os.path.join(SAVE_DIR, "mps_1024_correlated.safetensors")
-    model._submodules['mps'].save_cores(save_path, metadata={
+    model._submodules['tn'].save_cores(save_path, metadata={
         'n_qubits': str(N_QUBITS),
         'bond_dim': str(BOND_DIM),
         'n_steps': str(N_STEPS),
@@ -162,11 +158,8 @@ def main():
 
     # Reload validation
     print("\n=== Reload Validation ===")
-    model_val = Quadratic(graph, PHYS_DIM, backend=backend)
-    model_val._submodules['circuit'].auto_init(orthogonal=False)
-    init_circuit_01(model_val._submodules['circuit'], backend)
-    init_measure_identity(model_val._submodules['mx'], backend)
-    model_val._submodules['mps'].load_cores(save_path)
+    model_val = BornMachine(graph, PHYS_DIM, backend=backend).auto_init(orthogonal=True)
+    model_val._submodules['tn'].load_cores(save_path)
     combined_val = model_val.build()
 
     from tneq_qc.core.tn_tensor import TNTensor

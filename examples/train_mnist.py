@@ -154,7 +154,7 @@ def main():
 
     backend = BackendFactory.create_backend('pytorch', device=device,
                                             dtype='float32')
-    engine  = EngineCommon(backend=backend, strategy_mode="full")
+    engine  = EngineCommon(backend=backend, strategy="row_priority")
 
     graph = "\n".join(["-2-A-2-"] * N_QUBITS)
 

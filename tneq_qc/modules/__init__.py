@@ -3,7 +3,7 @@
 Small (leaf) modules
 --------------------
 - :class:`~tneq_qc.modules.small.MPS`
-- :class:`~tneq_qc.modules.small.CircuitState`
+- :class:`~tneq_qc.modules.small.State`
 - :class:`~tneq_qc.modules.small.MeasureMatrix`
 
 Application modules
@@ -13,14 +13,15 @@ Application modules
 - :class:`~tneq_qc.modules.app.MPS_with_Ref`
 - :class:`~tneq_qc.modules.app.Encoding`
 - :class:`~tneq_qc.modules.app.TNEQ`
-- :class:`~tneq_qc.modules.app.Quadratic`
+- :class:`~tneq_qc.modules.app.BornMachine`
 """
 
-from .small import MPS, CircuitState, MeasureMatrix
-from .app import PlainMPS, TransposeMPS, MPS_with_Ref, Encoding, TNEQ, Quadratic
+from .small import MPS, State, CircuitState, MeasureMatrix
+from .app import PlainMPS, TransposeMPS, MPS_with_Ref, Encoding, TNEQ, BornMachine, Quadratic
 
 __all__ = [
     "MPS",
+    "State",
     "CircuitState",
     "MeasureMatrix",
     "PlainMPS",
@@ -28,5 +29,6 @@ __all__ = [
     "MPS_with_Ref",
     "Encoding",
     "TNEQ",
+    "BornMachine",
     "Quadratic",
 ]

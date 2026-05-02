@@ -1,6 +1,6 @@
-"""Quadratic form training example.
+"""Born machine training example.
 
-Structure: circuit + mps + mx + mps_h + circuit_bra
+Structure: state + tn + mx + tn_h + state_bra
 Loss: NLL -mean(log(P) + log_scale) on batch expectation value.
 
 After training: saves model, generates heatmap + scatter plot,
@@ -22,7 +22,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from tneq_qc import (
-    QCTN, TNTensor, EngineCommon, BackendFactory, Quadratic,
+    QCTN, TNTensor, EngineCommon, BackendFactory, BornMachine,
     DataGenerator, create_optimizer,
 )
 
@@ -41,20 +41,6 @@ GRAPH      = "\n".join([
     "-2-------b--2-c--2-d--2-",
     "-2-------------c--2-d--2-",
 ])
-
-
-def init_circuit_01(qctn: QCTN, backend) -> QCTN:
-    """Fill each circuit core with an alternating 0/1 pattern."""
-    for c in qctn.cores:
-        core = qctn.cores_weights[c]
-        shape = tuple(core.shape)
-        n = 1
-        for d in shape:
-            n *= d
-        flat = torch.zeros(n, dtype=backend.default_dtype)
-        flat[-1] = 1
-        qctn.cores_weights[c] = backend.convert_to_tensor(flat.reshape(shape))
-    return qctn
 
 
 def compute_marginal_heatmap(engine, combined, data_gen, mx_core_names,
@@ -145,19 +131,15 @@ def init_measure_identity(qctn: QCTN, backend) -> QCTN:
 def main():
     device = os.environ.get('TNEQ_DEVICE', 'cpu')
     backend  = BackendFactory.create_backend('pytorch', device=device, dtype='complex64')
-    engine   = EngineCommon(backend=backend, strategy_mode="full")
+    engine   = EngineCommon(backend=backend, strategy="row_priority")
     data_gen = DataGenerator(backend, mx_K=DIM)
 
     # Build model
-    model = Quadratic(
+    model = BornMachine(
         GRAPH,
         DIM,
         backend=backend,
-    )
-    model._submodules['tn'].auto_init(orthogonal=True)
-    model._submodules['circuit'].auto_init(orthogonal=False)
-    init_circuit_01(model._submodules['circuit'], backend)
-    init_measure_identity(model._submodules['mx'], backend)
+    ).auto_init(orthogonal=True)
     model._submodules['tn'].requires_grad_(True)
     combined = model.build()
 
@@ -174,6 +156,7 @@ def main():
     optimizer = create_optimizer("sgdg", combined.parameters(), backend=backend, lr=LR)
     mx_core_names = model.mx_core_names
     loss_history = []
+
 
     for step in range(1, N_STEPS + 1):
         x = np.random.uniform(-1.0, 1.0, size=(BATCH_SIZE, N_QUBITS)).astype(np.float32)
@@ -295,14 +278,11 @@ def main():
 
     # 4. Reload validation
     print("\n=== Reload Validation ===")
-    model_val = Quadratic(
+    model_val = BornMachine(
         GRAPH,
         DIM,
         backend=backend,
-    )
-    model_val._submodules['circuit'].auto_init(orthogonal=False)
-    init_circuit_01(model_val._submodules['circuit'], backend)
-    init_measure_identity(model_val._submodules['mx'], backend)
+    ).auto_init(orthogonal=True)
     model_val._submodules['tn'].load_cores(save_path)
     combined_val = model_val.build()
 

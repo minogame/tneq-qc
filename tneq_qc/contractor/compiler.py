@@ -5,7 +5,7 @@ This module provides the StrategyCompiler class that manages strategy selection.
 """
 
 from __future__ import annotations
-from typing import Dict, List, Any, Tuple, Callable
+from typing import Dict, List, Any, Tuple, Callable, Union
 
 from .base import ContractionStrategy
 
@@ -23,17 +23,39 @@ class StrategyCompiler:
     # Global strategy registry
     _strategies: Dict[str, ContractionStrategy] = {}
     
-    def __init__(self, mode: str = 'fast'):
+    def __init__(
+        self,
+        strategy: Union[str, List[str], None] = None,
+        mode: str = None,
+    ):
         """
         Initialize compiler
         
         Args:
-            mode: 'fast', 'balanced', or 'full'
+            strategy: Strategy name or ordered list of candidate strategy names.
+            mode: Deprecated compatibility option: 'fast', 'balanced', or 'full'.
         """
-        if mode not in self.MODES:
-            raise ValueError(f"Invalid mode '{mode}'. Must be one of {list(self.MODES.keys())}")
-        
+        if strategy is None:
+            if mode is None:
+                strategy = 'row_priority'
+            else:
+                if mode not in self.MODES:
+                    raise ValueError(
+                        f"Invalid mode '{mode}'. Must be one of {list(self.MODES.keys())}"
+                    )
+                strategy = self.MODES[mode]
+
+        if isinstance(strategy, str):
+            strategy_names = [strategy]
+        else:
+            strategy_names = list(strategy)
+
+        if not strategy_names:
+            raise ValueError("strategy must contain at least one strategy name")
+
         self.mode = mode
+        self.strategy_names = strategy_names
+        self.strategy_key = "+".join(strategy_names)
     
     @classmethod
     def register_strategy(cls, strategy: ContractionStrategy, modes: List[str] = None):
@@ -84,15 +106,15 @@ class StrategyCompiler:
         Returns:
             tuple: (compute_fn, strategy_name, estimated_cost)
         """
-        # Get strategy list for current mode
-        strategy_names = self.MODES[self.mode]
-        
         candidates = []
         
-        print(f"[Compiler] Mode: {self.mode}, Testing {len(strategy_names)} strategies...")
+        print(
+            f"[Compiler] Strategy candidates: {self.strategy_names}, "
+            f"Testing {len(self.strategy_names)} strategies..."
+        )
         
         # Iterate over all candidate strategies
-        for name in strategy_names:
+        for name in self.strategy_names:
             if name not in self._strategies:
                 print(f"  [{name}] Strategy not registered, skipping...")
                 continue

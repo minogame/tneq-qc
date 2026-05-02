@@ -1,11 +1,11 @@
 """Application-level QCTN modules.
 
-Each class composes small modules (MPS, CircuitState, MeasureMatrix) via
+Each class composes small modules (MPS, State, MeasureMatrix) via
 ``register_module`` to form a complete computational graph.
 
 Example::
 
-    model = Quadratic(QCTNHelper.mps(3, bond_dim=2, phys_dim=2), 2, backend=backend).auto_init(orthogonal=True)
+    model = BornMachine(QCTNHelper.mps(3, bond_dim=2, phys_dim=2), 2, backend=backend).auto_init(orthogonal=True)
     combined = model.build()       # ready-to-use combined QCTN
     data_fn = make_data_fn(gen, combined, batch_size=128, K=2)
 """
@@ -16,7 +16,7 @@ from typing import List
 
 from ..core.qctn import QCTN
 from ..core.tn_tensor import TNTensor
-from .small import MPS, CircuitState, MeasureMatrix
+from .small import MPS, State, MeasureMatrix
 
 
 class PlainMPS(QCTN):
@@ -89,11 +89,11 @@ class MPS_with_Ref(QCTN):
 
 
 class Encoding(QCTN):
-    """Encoding network: CircuitState + MPS."""
+    """Encoding network: State + MPS."""
 
     def __init__(self, nqubits: int, bond_dim: int, phys_dim: int = 2, backend=None):
         super().__init__(graph=None, backend=backend, _defer_init=True)
-        self.register_module("circuit", CircuitState(nqubits, phys_dim, backend))
+        self.register_module("state", State(nqubits, phys_dim, backend))
         self.register_module("mps", MPS(nqubits, bond_dim, phys_dim, backend))
 
 
@@ -106,18 +106,39 @@ class TNEQ(QCTN):
         self.register_module("mps2", MPS(nqubits, bond_dim, phys_dim, backend))
 
 
-class Quadratic(QCTN):
-    """Quadratic form: <circuit | mps_h · mx · mps | circuit>.
+def _init_measure_identity(qctn: QCTN, backend) -> QCTN:
+    """Initialize measure-like cores as identity matrices."""
+    for core_info in qctn.adjacency_table:
+        core_name = core_info['core_name']
+        input_shape = core_info['input_shape']
+        output_shape = core_info['output_shape']
+        input_dim = core_info['input_dim']
+        output_dim = core_info['output_dim']
+        if input_dim != output_dim:
+            raise ValueError(
+                f"Measure core {core_name!r} must be square, got {input_dim} and {output_dim}."
+            )
+        core = backend.eye(input_dim)
+        raw = core.tensor if isinstance(core, TNTensor) else core
+        qctn.cores_weights[core_name] = TNTensor(
+            backend.reshape(raw, input_shape + output_shape)
+        )
+        qctn.cores_weights[core_name].requires_grad_(False)
+    return qctn
 
-    Composes circuit, mps (trainable), and mx (data-driven). Call
+
+class BornMachine(QCTN):
+    """Born machine: <state | tn_h · mx · tn | state>.
+
+    Composes state, tn (trainable), and mx (data-driven). Call
     ``build()`` to get the 5-segment combined QCTN ready for contraction.
 
     Example::
 
         graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
-        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
+        model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
         combined = model.build()
-        # combined has: cs + mps + mx + mps_h + cs_t
+        # combined has: state + tn + mx + tn_h + state_t
     """
 
     def __init__(
@@ -125,40 +146,64 @@ class Quadratic(QCTN):
         graph: str,
         dim: int,
         backend=None,
+        mx_graph: str = None,
     ):
         if graph is None:
-            raise ValueError("Quadratic requires a non-None graph string.")
+            raise ValueError("BornMachine requires a non-None graph string.")
         super().__init__(graph=None, backend=backend, _defer_init=True)
         tn_module = QCTN.from_graph(graph, backend=backend)
+        mx_module = (
+            QCTN.from_graph(mx_graph, backend=backend)
+            if mx_graph is not None
+            else MeasureMatrix(tn_module.nqubits, dim, backend)
+        )
         self._graph = graph
+        self._mx_graph = mx_graph
         self._dim = dim
         self._nqubits = tn_module.nqubits
-        self.register_module("circuit", CircuitState(self._nqubits, dim, backend))
+        self.register_module("state", State(self._nqubits, dim, backend))
         self.register_module("tn", tn_module)
-        self.register_module("mx", MeasureMatrix(self._nqubits, dim, backend))
+        self.register_module("mx", mx_module)
+
+    def auto_init(
+        self,
+        dtype=None,
+        device=None,
+        distribution: str = "gaussian",
+        orthogonal: bool = False,
+    ) -> "BornMachine":
+        self._submodules["state"].auto_init(dtype=dtype, device=device)
+        self._submodules["tn"].auto_init(
+            dtype=dtype,
+            device=device,
+            distribution=distribution,
+            orthogonal=orthogonal,
+        )
+        _init_measure_identity(self._submodules["mx"], self.backend)
+        return self
 
     def build(self) -> QCTN:
-        """Return the 5-segment combined QCTN: cs + mps + mx + mps_h + cs_t.
+        """Return the 5-segment combined QCTN: state + tn + mx + tn_h + state_t.
 
-        The mps submodule should have ``requires_grad_(True)`` set before
+        The tn submodule should have ``requires_grad_(True)`` set before
         calling this method. The returned QCTN is ready for training.
 
         Returns:
             Combined QCTN with all segments concatenated.
         """
-        circuit = self._submodules['circuit']
+        state = self._submodules['state']
         tn = self._submodules['tn']
         mx = self._submodules['mx']
 
         tn_h = tn.hermit()
-        circuit_bra = circuit.bra()
+        state_bra = state.bra()
 
         combined = QCTN.concat([
-            ('cs', circuit),
+            ('state', state),
             ('tn', tn),
             ('mx', mx),
             ('tn_h', tn_h),
-            ('cs_t', circuit_bra),
+            ('state_t', state_bra),
         ])
         self._combined = combined
         return combined
@@ -176,3 +221,7 @@ class Quadratic(QCTN):
             combined.core_names[sym] for sym in combined.cores
             if combined.core_names.get(sym, '').startswith('mx.')
         ]
+
+
+class Quadratic(BornMachine):
+    """Backward-compatible alias for :class:`BornMachine`."""

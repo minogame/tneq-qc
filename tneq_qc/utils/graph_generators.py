@@ -304,7 +304,7 @@ class QCTNHelper:
                 # Default to n layers if not specified
                 L = 4
                 return generate_wall_graph(n, L, dim_char)
-            elif graph_type == "circuit":
+            elif graph_type in ("state", "circuit"):
                 return generate_circuit_graph(n, dim_char)
             elif graph_type == "mx":
                 return generate_mx_graph(n, dim_char)
@@ -468,6 +468,14 @@ class QCTNHelper:
         char_list = [opt_einsum.get_symbol(i) for i in range(nqubits)]
         p = str(phys_dim)
         return '\n'.join(f'-{c}-{p}-' for c in char_list)
+
+    @staticmethod
+    def state(nqubits, phys_dim=2):
+        """Generate a product-state graph.
+
+        Alias for :meth:`circuit_state`; ``state`` is the preferred public name.
+        """
+        return QCTNHelper.circuit_state(nqubits, phys_dim)
 
     @staticmethod
     def circuit_bra(nqubits, phys_dim=2):

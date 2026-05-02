@@ -10,6 +10,7 @@ Now supports strategy-based compilation for optimized contraction paths.
 from __future__ import annotations
 from enum import Enum, auto
 from typing import Callable, Optional, Union, List, Tuple, Dict, Any
+import warnings
 
 from tqdm import tqdm
 
@@ -56,7 +57,13 @@ class EngineCommon:
     - ComputeBackend: Executes expressions using JAX, PyTorch, etc.
     """
 
-    def __init__(self, backend: Optional[Union[str, ComputeBackend]] = None, strategy_mode: str = 'balanced', nqubits: Optional[int] = None):
+    def __init__(
+        self,
+        backend: Optional[Union[str, ComputeBackend]] = None,
+        strategy: Union[str, List[str], None] = None,
+        strategy_mode: Optional[str] = None,
+        nqubits: Optional[int] = None,
+    ):
         """Initialize the engine with a specific backend and strategy mode.
 
         Args:
@@ -64,7 +71,9 @@ class EngineCommon:
                 Can be ``'jax'``, ``'pytorch'``, or a
                 :class:`~tneq_qc.backends.backend_factory.ComputeBackend`
                 instance.  Defaults to the framework default backend.
-            strategy_mode (str): Contraction strategy mode:
+            strategy (str or list[str]): Strategy name, or a list of candidate
+                strategy names. Defaults to ``'row_priority'``.
+            strategy_mode (str): Deprecated contraction strategy mode:
 
                 - ``'fast'``: einsum only (fastest compilation)
                 - ``'balanced'``: row-priority only (default)
@@ -84,8 +93,28 @@ class EngineCommon:
         else:
             self.backend = backend
 
+        if strategy is None and strategy_mode is None:
+            strategy = 'row_priority'
+        elif strategy is not None and strategy_mode is not None:
+            warnings.warn(
+                "Both strategy and strategy_mode were provided; strategy takes precedence.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif strategy_mode is not None:
+            warnings.warn(
+                "strategy_mode is deprecated; pass strategy='row_priority' or "
+                "strategy='einsum_default' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self.contractor = EinsumStrategy()
-        self.strategy_compiler = StrategyCompiler(mode=strategy_mode)
+        self.strategy_compiler = StrategyCompiler(
+            strategy=strategy,
+            mode=None if strategy is not None else strategy_mode,
+        )
+        self.strategy = self.strategy_compiler.strategy_key
         self.strategy_mode = strategy_mode
 
         self._nqubits: Optional[int] = nqubits
@@ -121,7 +150,7 @@ class EngineCommon:
         Returns:
             Contraction result.
         """
-        cache_key = f'_compiled_strategy_{self.strategy_mode}'
+        cache_key = f'_compiled_strategy_{self.strategy}'
 
         if not hasattr(qctn, cache_key):
             compute_fn, strategy_name, cost = self.strategy_compiler.compile(
@@ -156,7 +185,7 @@ class EngineCommon:
         Returns:
             tuple: ``(loss_value, gradients)``
         """
-        cache_key = f'_compiled_strategy_{self.strategy_mode}'
+        cache_key = f'_compiled_strategy_{self.strategy}'
 
         if not hasattr(qctn, cache_key):
             compute_fn, strategy_name, cost = self.strategy_compiler.compile(
@@ -239,6 +268,22 @@ class EngineCommon:
     # Probability Calculation
     # ============================================================================
 
+    def _mx_core_names(self, qctn) -> List[str]:
+        names_map = getattr(qctn, 'core_names', {})
+        return [
+            names_map[sym] for sym in qctn.cores
+            if names_map.get(sym, '').startswith('mx.')
+        ]
+
+    def _identity_for_core(self, qctn, name: str) -> TNTensor:
+        core = qctn[name]
+        raw = core.tensor if isinstance(core, TNTensor) else core
+        K = raw.shape[-1]
+        ident = self.backend.eye(K)
+        if isinstance(ident, TNTensor):
+            return ident
+        return TNTensor(ident)
+
     def calculate_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
         """Calculate probability by updating mx cores and contracting.
 
@@ -271,6 +316,22 @@ class EngineCommon:
 
         return float(val.item()) if hasattr(val, 'item') else float(val)
 
+    def full_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
+        """Calculate full probability after validating all mx cores are set."""
+        expected = set(self._mx_core_names(qctn))
+        actual = set(mx_dict)
+        missing = expected - actual
+        if missing:
+            raise ValueError(f"full_probability missing mx cores: {sorted(missing)}")
+        return self.calculate_probability(qctn, mx_dict)
+
+    def marginal_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
+        """Calculate marginal probability; unspecified mx cores trace out."""
+        for name in self._mx_core_names(qctn):
+            if name not in mx_dict:
+                qctn[name] = self._identity_for_core(qctn, name)
+        return self.calculate_probability(qctn, mx_dict)
+
     # ============================================================================
     # Sampling
     # ============================================================================
@@ -283,6 +344,7 @@ class EngineCommon:
         num_samples: int,
         bounds: Tuple[float, float] = (-5, 5),
         grid_size: int = 1000,
+        use_marginal: bool = False,
     ):
         """Sample from the QCTN probability distribution via inverse CDF.
 
@@ -298,6 +360,8 @@ class EngineCommon:
             num_samples: Number of samples (S).
             bounds: Sampling range ``(x_min, x_max)``.
             grid_size: Number of CDF grid points (G).
+            use_marginal: If True, sample every dimension from its marginal
+                distribution instead of the autoregressive conditional.
 
         Returns:
             Tensor of shape ``(num_samples, len(sample_core_names))``.
@@ -429,9 +493,105 @@ class EngineCommon:
             samples[:, i] = sampled_y.squeeze(1)
 
             # G: Update current core with sampled Mx (S, K, K).
-            mx_list_y, _ = data_generator.generate(
-                sampled_y, K=K, ret_type='TNTensor'
-            )
-            qctn[core_name] = mx_list_y[0]
+            if use_marginal:
+                qctn[core_name] = ident_tt
+            else:
+                mx_list_y, _ = data_generator.generate(
+                    sampled_y, K=K, ret_type='TNTensor'
+                )
+                qctn[core_name] = mx_list_y[0]
 
         return samples
+
+    def sample_discrete(
+        self,
+        qctn,
+        data_generator,
+        sample_core_names: List[str],
+        num_samples: int,
+        values=None,
+        use_marginal: bool = False,
+    ):
+        """Sample discrete values by enumerating candidate measurement cores."""
+        import numpy as np
+
+        if values is None:
+            values = getattr(data_generator, "values", None)
+        if values is None:
+            raise ValueError("values must be provided or available on data_generator")
+        values = tuple(values)
+
+        first_core = qctn[sample_core_names[0]]
+        raw_first = first_core.tensor if isinstance(first_core, TNTensor) else first_core
+        K = raw_first.shape[-1]
+        ident_tt = self._identity_for_core(qctn, sample_core_names[0])
+
+        for name in sample_core_names:
+            qctn[name] = ident_tt
+
+        samples_np = np.zeros((num_samples, len(sample_core_names)), dtype=np.asarray(values).dtype)
+
+        for i, core_name in enumerate(tqdm(sample_core_names, desc="Discrete sampling")):
+            prob_columns = []
+            current = qctn[core_name]
+            saved_current = current.clone() if isinstance(current, TNTensor) else current
+
+            for value in values:
+                x_value = np.full((num_samples, 1), value)
+                mx_list, _ = data_generator.generate(x_value, K=K, ret_type='TNTensor')
+                qctn[core_name] = mx_list[0]
+
+                saved_cores: Dict[str, Any] = {}
+                for other_name in sample_core_names:
+                    if other_name == core_name:
+                        continue
+                    other = qctn[other_name]
+                    raw_other = other.tensor if isinstance(other, TNTensor) else other
+                    saved_cores[other_name] = other.clone() if isinstance(other, TNTensor) else other
+
+                    if raw_other.ndim == 2:
+                        expanded = self.backend.unsqueeze(raw_other, 0)
+                        expanded = self.backend.expand(expanded, num_samples, -1, -1)
+                        qctn[other_name] = TNTensor(expanded, has_batch=True)
+
+                result = self.contract(qctn)
+
+                for other_name, saved in saved_cores.items():
+                    qctn[other_name] = saved
+
+                result_raw = result.tensor if isinstance(result, TNTensor) else result
+                if hasattr(result_raw, 'is_complex') and result_raw.is_complex():
+                    result_raw = (result_raw * result_raw.conj()).real
+                else:
+                    result_raw = result_raw.abs().square()
+                prob_columns.append(np.asarray(self.backend.tensor_to_numpy(result_raw)).reshape(num_samples))
+
+            qctn[core_name] = saved_current
+
+            probs = np.stack(prob_columns, axis=1)
+            probs = np.clip(probs, 0.0, None)
+            totals = probs.sum(axis=1, keepdims=True)
+            probs = probs / np.maximum(totals, 1e-12)
+
+            draws = [
+                np.random.choice(len(values), p=probs[row])
+                for row in range(num_samples)
+            ]
+            sampled_values = np.asarray([values[idx] for idx in draws])
+            samples_np[:, i] = sampled_values
+
+            if use_marginal:
+                qctn[core_name] = ident_tt
+            else:
+                mx_list, _ = data_generator.generate(
+                    sampled_values.reshape(num_samples, 1),
+                    K=K,
+                    ret_type='TNTensor',
+                )
+                qctn[core_name] = mx_list[0]
+
+        samples = self.backend.convert_to_tensor(samples_np)
+        raw_samples = samples.tensor if isinstance(samples, TNTensor) else samples
+        if hasattr(raw_samples, 'is_complex') and raw_samples.is_complex():
+            raw_samples = raw_samples.real
+        return raw_samples

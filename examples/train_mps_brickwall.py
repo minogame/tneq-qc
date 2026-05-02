@@ -1,4 +1,4 @@
-"""Quadratic training: custom MPS-of-Brickwall structure with standard Gaussian.
+"""Born machine training: custom MPS-of-Brickwall structure with standard Gaussian.
 
 The TN structure is an MPS-like chain where each "block" is a 2-layer brickwall.
 Adjacent blocks overlap by 3 qubits.
@@ -16,7 +16,7 @@ Example (7 qubits, block_qubits=5, overlap=3, 2 blocks):
     Block 1 (a,b,c,d): brickwall on qubits 0-4
     Block 2 (e,f,g,h): brickwall on qubits 2-6
 
-Structure: circuit + custom_tn + mx + custom_tn_h + circuit_bra
+Structure: state + custom_tn + mx + custom_tn_h + state_bra
 Data: standard Gaussian N(0, I)
 dtype: complex64, CPU
 
@@ -39,7 +39,7 @@ from tneq_qc import (
     QCTN, BackendFactory, EngineCommon,
     DataGenerator, create_optimizer,
 )
-from tneq_qc.modules.small import CircuitState, MeasureMatrix
+from tneq_qc.modules.small import State, MeasureMatrix
 
 
 # =====================================================================
@@ -208,7 +208,7 @@ def init_measure_identity(qctn: QCTN, backend) -> QCTN:
 
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-    engine  = EngineCommon(backend=backend, strategy_mode='full')
+    engine  = EngineCommon(backend=backend, strategy='row_priority')
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
     # --- Generate custom TN graph ---
@@ -225,8 +225,8 @@ def main():
     print(f"\nGraph preview:")
     print_graph_preview(tn_graph)
 
-    # --- Build 5-segment Quadratic structure ---
-    print(f"\nBuilding Quadratic structure...")
+    # --- Build 5-segment Born-machine structure ---
+    print(f"\nBuilding BornMachine structure...")
     t0 = time.time()
 
     # 1) Custom TN (trainable)
@@ -236,9 +236,8 @@ def main():
     # print('custom_tn', len(custom_tn.cores))
     # exit()
 
-    # 2) CircuitState (ket)
-    circuit = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init(orthogonal=False)
-    circuit = init_circuit_01(circuit, backend)
+    # 2) State (ket), initialized as [1, 0, ..., 0]
+    state = State(actual_qubits, PHYS_DIM, backend).auto_init()
 
     # 3) MeasureMatrix (data injection)
     mx = init_measure_identity(MeasureMatrix(actual_qubits, PHYS_DIM, backend), backend)
@@ -246,16 +245,16 @@ def main():
     # 4) Hermitian conjugate
     tn_hermit = custom_tn.hermit()
 
-    # 5) CircuitState bra
-    circuit_bra = circuit.bra()
+    # 5) State bra
+    state_bra = state.bra()
 
     # Concatenate
     combined = QCTN.concat([
-        ('cs',   circuit),
+        ('state', state),
         ('tn',   custom_tn),
         ('mx',   mx),
         ('tn_h', tn_hermit),
-        ('cs_t', circuit_bra),
+        ('state_t', state_bra),
     ])
     t_init = time.time() - t0
 
@@ -320,11 +319,11 @@ def main():
     custom_tn_val.load_cores(save_path)
     tn_hermit_val = custom_tn_val.hermit()
     combined_val = QCTN.concat([
-        ('cs',   circuit),
+        ('state', state),
         ('tn',   custom_tn_val),
         ('mx',   mx),
         ('tn_h', tn_hermit_val),
-        ('cs_t', circuit_bra),
+        ('state_t', state_bra),
     ])
 
     from tneq_qc.core.tn_tensor import TNTensor

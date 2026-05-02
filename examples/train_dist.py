@@ -18,7 +18,7 @@ import torch.distributed as dist
 import numpy as np
 
 from tneq_qc import (
-    QCTN, BackendFactory, Quadratic,
+    QCTN, BackendFactory, BornMachine,
     DataGenerator, make_data_fn, create_optimizer,
 )
 from tneq_qc.distributed import EngineDistributed
@@ -81,7 +81,7 @@ def main():
 
     if rank == 0:
         print("=" * 60)
-        print("Distributed Quadratic Form Training")
+        print("Distributed Born Machine Training")
         print(f"  world_size={world_size}  N={N_QUBITS}  B={BOND_DIM}  K={PHYS_DIM}")
         print("=" * 60)
 
@@ -90,12 +90,8 @@ def main():
 
     # Build model
     graph = QCTNHelper.mps(N_QUBITS, bond_dim=BOND_DIM, phys_dim=PHYS_DIM)
-    model = Quadratic(graph, PHYS_DIM, backend=backend)
-    model._submodules['mps'].auto_init(orthogonal=True)
-    model._submodules['circuit'].auto_init(orthogonal=False)
-    init_circuit_01(model._submodules['circuit'], backend)
-    init_measure_identity(model._submodules['mx'], backend)
-    model._submodules['mps'].requires_grad_(True)
+    model = BornMachine(graph, PHYS_DIM, backend=backend).auto_init(orthogonal=True)
+    model._submodules['tn'].requires_grad_(True)
     combined = model.build()
 
     # Create engine
@@ -106,7 +102,7 @@ def main():
     )
     engine = EngineDistributed(
         backend=backend,
-        strategy_mode='full',
+        strategy='row_priority',
         comm=comm,
         partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
     )

@@ -189,11 +189,12 @@ class EngineDistributed(EngineCommon):
 
     def __init__(self,
                  backend=None,
+                 strategy: Optional[str] = None,
                  strategy_mode: str = 'balanced',
                  comm: Optional[CommBase] = None,
                  partition_config: Optional[PartitionConfig] = None,
                  comm_timeout: float = 300.0):
-        super().__init__(backend=backend, strategy_mode=strategy_mode)
+        super().__init__(backend=backend, strategy=strategy, strategy_mode=strategy_mode)
 
         self.comm = comm or get_comm_backend(self.backend.backend_info.backend_type)
 

@@ -15,6 +15,7 @@ Example::
 from __future__ import annotations
 
 from ..core.qctn import QCTN
+from ..core.tn_tensor import TNTensor
 from ..utils.graph_generators import QCTNHelper
 
 
@@ -49,8 +50,8 @@ class MPS(QCTN):
         self.phys_dim = phys_dim
 
 
-class CircuitState(QCTN):
-    """Circuit state (ket vector): one core per qubit, no left input dimension.
+class State(QCTN):
+    """Product state (ket vector): one core per qubit, no left input dimension.
 
     Each qubit row has a single core with only a right (output) edge of
     dimension ``phys_dim``.  This represents a product-state input to a
@@ -62,8 +63,8 @@ class CircuitState(QCTN):
         -B-2-
         -C-2-
 
-    Core tensors are declared but **not** initialized; call
-    :meth:`auto_init` to initialize them.
+    ``auto_init`` initializes each core to the computational basis state
+    ``[1, 0, ..., 0]``.
 
     Args:
         nqubits: Number of qubits (one core per qubit).
@@ -74,8 +75,39 @@ class CircuitState(QCTN):
     def __init__(self, nqubits: int, phys_dim: int = 2, backend=None):
         graph = QCTNHelper.circuit_state(nqubits, phys_dim)
         super().__init__(graph, backend=backend, _defer_init=True)
-        self.nqubits_cs = nqubits
+        self.nqubits_state = nqubits
         self.phys_dim = phys_dim
+
+    def auto_init(
+        self,
+        dtype=None,
+        device=None,
+        distribution: str = "gaussian",
+        orthogonal: bool = False,
+    ) -> "State":
+        """Initialize all state cores to ``[1, 0, ..., 0]``.
+
+        The extra arguments are accepted for API compatibility with QCTN.
+        """
+        if self.backend is None:
+            raise ValueError("Backend is required for auto_init")
+
+        for core_info in self.adjacency_table:
+            core_name = core_info["core_name"]
+            shape = tuple(core_info["input_shape"] + core_info["output_shape"])
+            batch_size = getattr(self, "_core_batch_size", None)
+            tensor_shape = (batch_size,) + shape if batch_size is not None else shape
+            tensor = self.backend.zeros(tensor_shape, dtype=dtype)
+            raw = tensor.tensor if isinstance(tensor, TNTensor) else tensor
+            if batch_size is None:
+                raw.reshape(-1)[0] = 1
+            else:
+                raw.reshape(batch_size, -1)[:, 0] = 1
+            self.cores_weights[core_name] = TNTensor(raw, has_batch=batch_size is not None)
+        return self
+
+
+CircuitState = State
 
 
 class MeasureMatrix(QCTN):

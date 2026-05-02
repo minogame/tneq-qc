@@ -1,4 +1,4 @@
-"""Distributed Quadratic training: MPS-of-Brickwall with standard Gaussian.
+"""Distributed Born machine training: MPS-of-Brickwall with standard Gaussian.
 
 Same model as train_mps_brickwall.py but using EngineDistributed for
 multi-process training via torchrun.
@@ -30,7 +30,7 @@ from tneq_qc import (
     QCTN, BackendFactory,
     DataGenerator, create_optimizer,
 )
-from tneq_qc.modules.small import CircuitState, MeasureMatrix
+from tneq_qc.modules.small import State, MeasureMatrix
 from tneq_qc.distributed import EngineDistributed
 from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
 from tneq_qc.distributed.comm import get_comm_backend
@@ -179,24 +179,23 @@ def main():
               f"blocks={n_blocks}  phys_dim={PHYS_DIM}")
         print("=" * 60)
 
-    # --- Build 5-segment Quadratic structure ---
+    # --- Build 5-segment Born-machine structure ---
     t0 = time.time()
 
     custom_tn = QCTN(tn_graph, backend=backend).auto_init(orthogonal=True)
     custom_tn.requires_grad_(True)
 
-    circuit     = CircuitState(actual_qubits, PHYS_DIM, backend).auto_init(orthogonal=False)
-    circuit     = init_circuit_01(circuit, backend)
+    state       = State(actual_qubits, PHYS_DIM, backend).auto_init()
     mx          = init_measure_identity(MeasureMatrix(actual_qubits, PHYS_DIM, backend), backend)
     tn_hermit   = custom_tn.hermit()
-    circuit_bra = circuit.bra()
+    state_bra   = state.bra()
 
     combined = QCTN.concat([
-        ('cs',   circuit),
+        ('state', state),
         ('tn',   custom_tn),
         ('mx',   mx),
         ('tn_h', tn_hermit),
-        ('cs_t', circuit_bra),
+        ('state_t', state_bra),
     ])
     t_init = time.time() - t0
 
@@ -208,21 +207,21 @@ def main():
     # Group cores by segment prefix
     tn_cores = []       # (symbol, index_within_segment)
     tn_h_cores = []
-    cs_cores = []       # index = qubit index
-    cs_t_cores = []
+    state_cores = []       # index = qubit index
+    state_t_cores = []
     mx_cores_list = []
 
-    tn_i = tn_h_i = cs_i = cs_t_i = mx_i = 0
+    tn_i = tn_h_i = state_i = state_t_i = mx_i = 0
     for sym in combined.cores:
         name = combined.core_names.get(sym, sym)
         if name.startswith('tn_h.'):
             tn_h_cores.append((sym, tn_h_i)); tn_h_i += 1
         elif name.startswith('tn.'):
             tn_cores.append((sym, tn_i)); tn_i += 1
-        elif name.startswith('cs_t.'):
-            cs_t_cores.append((sym, cs_t_i)); cs_t_i += 1
-        elif name.startswith('cs.'):
-            cs_cores.append((sym, cs_i)); cs_i += 1
+        elif name.startswith('state_t.'):
+            state_t_cores.append((sym, state_t_i)); state_t_i += 1
+        elif name.startswith('state.'):
+            state_cores.append((sym, state_i)); state_i += 1
         elif name.startswith('mx.'):
             mx_cores_list.append((sym, mx_i)); mx_i += 1
 
@@ -277,7 +276,7 @@ def main():
                 partitions[p].append(sym)
                 break
 
-    # cs, mx, cs_t: assign by qubit to the partition whose range covers it.
+    # state, mx, state_t: assign by qubit to the partition whose range covers it.
     # If a qubit is in multiple partitions' ranges (overlap), pick the lower one.
     def qubit_to_partition(qi):
         for p, (qmin, qmax) in enumerate(partition_qubit_ranges):
@@ -285,9 +284,9 @@ def main():
                 return p
         return world_size - 1  # fallback: last partition
 
-    for sym, qi in cs_cores:
+    for sym, qi in state_cores:
         partitions[qubit_to_partition(qi)].append(sym)
-    for sym, qi in cs_t_cores:
+    for sym, qi in state_t_cores:
         partitions[qubit_to_partition(qi)].append(sym)
     for sym, qi in mx_cores_list:
         partitions[qubit_to_partition(qi)].append(sym)
@@ -318,7 +317,7 @@ def main():
         )
         engine = EngineDistributed(
             backend=backend,
-            strategy_mode='full',
+            strategy='row_priority',
             comm=comm,
             partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
         )
@@ -343,7 +342,7 @@ def main():
         local_params = engine._local_qctn.parameters() if engine._local_qctn else []
     else:
         from tneq_qc import EngineCommon
-        engine = EngineCommon(backend=backend, strategy_mode='full')
+        engine = EngineCommon(backend=backend, strategy='row_priority')
         local_params = combined.parameters()
 
     if rank == 0:

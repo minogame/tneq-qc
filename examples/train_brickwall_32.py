@@ -1,11 +1,10 @@
-"""Quadratic training: 32-qubit Brickwall with correlated Gaussian data.
+"""Born machine training: 32-qubit Brickwall with correlated Gaussian data.
 
-Structure: circuit + brickwall + mx + brickwall_h + circuit_bra
+Structure: state + brickwall + mx + brickwall_h + state_bra
 Data: MultivariateNormal with tridiagonal covariance (nearest-neighbor correlation 0.2)
 dtype: complex64, CPU
 
-Since Quadratic class hardcodes MPS, we manually build the 5-segment
-structure using QCTN.concat.
+This manually builds the 5-segment structure using QCTN.concat.
 
 Usage:
     python examples/train_brickwall_32.py
@@ -24,7 +23,7 @@ from tneq_qc import (
     QCTN, BackendFactory, EngineCommon, QCTNHelper,
     DataGenerator, create_optimizer,
 )
-from tneq_qc.modules.small import CircuitState, MeasureMatrix
+from tneq_qc.modules.small import State, MeasureMatrix
 
 N_QUBITS   = 10
 N_LAYERS   = 20        # brickwall layers (m = n_layers // 2 cores per row-pair)
@@ -91,16 +90,15 @@ def init_measure_identity(qctn: QCTN, backend) -> QCTN:
 
 def main():
     backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-    engine  = EngineCommon(backend=backend, strategy_mode='full')
+    engine  = EngineCommon(backend=backend, strategy='row_priority')
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
-    # --- Build 5-segment Quadratic structure manually ---
-    print(f"Building Brickwall Quadratic: {N_QUBITS} qubits, {N_LAYERS} layers")
+    # --- Build 5-segment Born-machine structure manually ---
+    print(f"Building Brickwall BornMachine: {N_QUBITS} qubits, {N_LAYERS} layers")
     t0 = time.time()
 
-    # 1) CircuitState (ket)
-    circuit = CircuitState(N_QUBITS, PHYS_DIM, backend).auto_init(orthogonal=False)
-    circuit = init_circuit_01(circuit, backend)
+    # 1) State (ket), initialized as [1, 0, ..., 0]
+    state = State(N_QUBITS, PHYS_DIM, backend).auto_init()
 
     # 2) Brickwall (trainable)
     bw_graph = QCTNHelper.brickwall(N_QUBITS, n_layers=N_LAYERS, phys_dim=PHYS_DIM)
@@ -118,16 +116,16 @@ def main():
     bw_hermit = brickwall.hermit()
     
 
-    # 5) CircuitState bra
-    circuit_bra = circuit.bra()
+    # 5) State bra
+    state_bra = state.bra()
 
     # Concatenate
     combined = QCTN.concat([
-        ('cs',   circuit),
+        ('state', state),
         ('bw',   brickwall),
         ('mx',   mx),
         ('bw_h', bw_hermit),
-        ('cs_t', circuit_bra),
+        ('state_t', state_bra),
     ])
     t_init = time.time() - t0
 
@@ -315,11 +313,11 @@ def main():
     bw_val.load_cores(save_path)
     bw_hermit_val = bw_val.hermit()
     combined_val = QCTN.concat([
-        ('cs',   circuit),
+        ('state', state),
         ('bw',   bw_val),
         ('mx',   mx),
         ('bw_h', bw_hermit_val),
-        ('cs_t', circuit_bra),
+        ('state_t', state_bra),
     ])
     mx_names_val = [
         combined_val.core_names[sym] for sym in combined_val.cores

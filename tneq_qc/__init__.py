@@ -5,14 +5,15 @@ from .core.tn_tensor import TNTensor
 from .core.engine_common import EngineCommon
 from .backends.backend_factory import BackendFactory
 from .utils.graph_generators import QCTNHelper
-from .utils.data_generator import DataGenerator, CustomDataGenerator, make_data_fn
+from .utils.data_generator import DataGenerator, CustomDataGenerator, DiscreteDataGenerator, make_data_fn
 from .optim import (
     OptimizerBase, ParamRef, Adam, SGD, SGDG, Momentum, RMSProp, StepLRScheduler,
     TensorOps, BackendTensorOps, register_optimizer, get_registered_optimizers,
     create_optimizer,
 )
 from .losses import LossRegistry, BaseLoss
-from .modules.app import Quadratic, TNEQ, Encoding, PlainMPS
+from .modules.app import BornMachine, Quadratic, TNEQ, Encoding, PlainMPS
+from .modules.small import State, CircuitState
 from .contractor import (
     ContractionStrategy,
     StrategyCompiler,
@@ -23,12 +24,13 @@ from .contractor import (
 
 __all__ = [
     "QCTN", "TNTensor", "EngineCommon", "BackendFactory", "QCTNHelper",
-    "DataGenerator", "CustomDataGenerator", "make_data_fn",
+    "DataGenerator", "CustomDataGenerator", "DiscreteDataGenerator", "make_data_fn",
     "OptimizerBase", "Adam", "SGD", "SGDG", "Momentum", "RMSProp", "StepLRScheduler",
     "ParamRef", "TensorOps", "BackendTensorOps",
     "register_optimizer", "get_registered_optimizers", "create_optimizer",
     "LossRegistry", "BaseLoss",
-    "Quadratic", "TNEQ", "Encoding", "PlainMPS",
+    "State", "CircuitState",
+    "BornMachine", "Quadratic", "TNEQ", "Encoding", "PlainMPS",
     "ContractionStrategy", "StrategyCompiler",
     "register_contraction_strategy", "get_registered_contraction_strategies",
     "get_contraction_strategy_modes",
