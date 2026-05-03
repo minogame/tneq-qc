@@ -190,7 +190,7 @@ class EngineDistributed(EngineCommon):
     def __init__(self,
                  backend=None,
                  strategy: Optional[str] = None,
-                 strategy_mode: str = 'balanced',
+                 strategy_mode: Optional[str] = None,
                  comm: Optional[CommBase] = None,
                  partition_config: Optional[PartitionConfig] = None,
                  comm_timeout: float = 300.0):
@@ -210,6 +210,8 @@ class EngineDistributed(EngineCommon):
         self._qctn: Optional['QCTN'] = None
         self._local_qctn: Optional['QCTN'] = None
         self._contract_plan: Optional[DistributedContractPlan] = None
+        self._current_partitions = set()
+        self._current_boundary_edges: List[Dict[str, Any]] = []
 
         self.num_stages = math.ceil(math.log2(self.world_size)) + 1 if self.world_size > 1 else 1
 
@@ -759,6 +761,10 @@ class EngineDistributed(EngineCommon):
         tic = time.time()
 
         local_result = self._contract_local()
+        self._current_partitions = {self.rank}
+        self._current_boundary_edges = self._boundary_edges_for_partitions(
+            self._current_partitions
+        )
 
         toc = time.time()
 
@@ -816,63 +822,177 @@ class EngineDistributed(EngineCommon):
         # --- Unwrap TNTensor ---
         if isinstance(local_result, TNTensor):
             my_log_scale = local_result.log_scale
+            my_scale = local_result.scale
             local_tensor = local_result.tensor
         else:
             my_log_scale = 0.0
+            my_scale = 1.0
             local_tensor = local_result
 
         # --- Exchange tensors ---
         partner_tensor = self._exchange_tensor_with_partner(local_tensor, partner_rank)
 
-        # --- Exchange log scales ---
-        my_ls = torch.tensor([my_log_scale], device=local_tensor.device, dtype=torch.float64)
-        partner_ls = torch.zeros(1, device=local_tensor.device, dtype=torch.float64)
+        # --- Exchange TNTensor scales ---
+        # ``TNTensor`` stores both scale and log_scale.  The effective value is
+        # tensor * scale, so the reduced TNTensor must preserve scale as well
+        # as log_scale.
+        my_scale_meta = torch.tensor(
+            [my_log_scale, my_scale],
+            device=local_tensor.device,
+            dtype=torch.float64,
+        )
+        partner_scale_meta = torch.zeros(
+            2,
+            device=local_tensor.device,
+            dtype=torch.float64,
+        )
         tag = 200 + stage_idx
         if self.rank < partner_rank:
-            self.comm.send(my_ls, partner_rank, tag=tag)
-            self.comm.recv(partner_rank, tag=tag, tensor=partner_ls)
+            self.comm.send(my_scale_meta, partner_rank, tag=tag)
+            self.comm.recv(partner_rank, tag=tag, tensor=partner_scale_meta)
         else:
-            self.comm.recv(partner_rank, tag=tag, tensor=partner_ls)
-            self.comm.send(my_ls, partner_rank, tag=tag)
+            self.comm.recv(partner_rank, tag=tag, tensor=partner_scale_meta)
+            self.comm.send(my_scale_meta, partner_rank, tag=tag)
 
-        # --- Count in / out boundary dims for my partition ---
-        cross_edges = self._get_cross_edges_for_stage(stage_idx, my_group)
-        my_partition = self.rank
+        prev_group_size = 2 ** (stage_idx - 1)
+        partner_group_start = (partner_rank // prev_group_size) * prev_group_size
+        partner_partitions = set(
+            range(
+                partner_group_start,
+                min(partner_group_start + prev_group_size, self.world_size),
+            )
+        )
+        my_partitions = set(self._current_partitions)
+        union_partitions = my_partitions | partner_partitions
 
-        n_in = sum(1 for e in cross_edges if e['to_partition'] == my_partition)
-        n_out = sum(1 for e in cross_edges if e['from_partition'] == my_partition)
-        n_spatial = n_in + n_out
+        my_edges = self._current_boundary_edges
+        partner_edges = self._boundary_edges_for_partitions(partner_partitions)
+        output_edges = self._boundary_edges_for_partitions(union_partitions)
 
-        local_print(f"[Rank {self.rank}] Reduce stage {stage_idx}: "
-                     f"n_in={n_in}, n_out={n_out}, "
-                     f"my shape={local_tensor.shape}, partner shape={partner_tensor.shape}")
+        if local_tensor.ndim == len(my_edges) + 1:
+            my_has_batch = True
+        elif local_tensor.ndim == len(my_edges):
+            my_has_batch = False
+        else:
+            raise RuntimeError(
+                f"Rank {self.rank} boundary metadata mismatch: tensor ndim "
+                f"{local_tensor.ndim}, metadata edges {len(my_edges)}."
+            )
 
-        # --- Build einsum equation ---
-        # My tensor dims:      [batch, in_0..in_{K-1}, out_0..out_{M-1}]
-        # Partner tensor dims:  [batch, in_0'..in_{M-1}', out_0'..out_{K-1}']
-        #   where partner's in = my out, partner's out = my in
-        # Contract ALL spatial dims -> result is [batch]
+        if partner_tensor.ndim == len(partner_edges) + 1:
+            partner_has_batch = True
+        elif partner_tensor.ndim == len(partner_edges):
+            partner_has_batch = False
+        else:
+            raise RuntimeError(
+                f"Rank {self.rank} partner boundary metadata mismatch: tensor ndim "
+                f"{partner_tensor.ndim}, metadata edges {len(partner_edges)}."
+            )
+
+        contract_keys = {
+            edge['key']
+            for edge in my_edges
+            if self._edge_other_partition(edge) in partner_partitions
+        }
+        contract_keys.update(
+            edge['key']
+            for edge in partner_edges
+            if self._edge_other_partition(edge) in my_partitions
+        )
 
         batch_sym = 'a'
-        in_syms = [opt_einsum.get_symbol(2 + i) for i in range(n_in)]
-        out_syms = [opt_einsum.get_symbol(2 + n_in + i) for i in range(n_out)]
+        key_to_symbol: Dict[Tuple, str] = {}
 
-        my_part = batch_sym + ''.join(in_syms) + ''.join(out_syms)
-        # Partner's in-dims match my out-dims; partner's out-dims match my in-dims
-        partner_part = batch_sym + ''.join(out_syms) + ''.join(in_syms)
+        def symbol_for(key: Tuple) -> str:
+            if key not in key_to_symbol:
+                # Start after 'a' to keep batch symbol stable.
+                key_to_symbol[key] = opt_einsum.get_symbol(len(key_to_symbol) + 1)
+            return key_to_symbol[key]
 
-        einsum_eq = f"{my_part},{partner_part}->{batch_sym}"
+        my_part = (batch_sym if my_has_batch else '') + ''.join(
+            symbol_for(edge['key']) for edge in my_edges
+        )
+        partner_part = (batch_sym if partner_has_batch else '') + ''.join(
+            symbol_for(edge['key']) for edge in partner_edges
+        )
+        rhs = (batch_sym if my_has_batch or partner_has_batch else '') + ''.join(
+            symbol_for(edge['key']) for edge in output_edges
+        )
+        einsum_eq = f"{my_part},{partner_part}->{rhs}"
 
-        local_print(f"[Rank {self.rank}] Reduce einsum: {einsum_eq}"
-                     f"  shapes: {local_tensor.shape} x {partner_tensor.shape}")
+        local_print(
+            f"[Rank {self.rank}] Reduce stage {stage_idx}: "
+            f"my_parts={sorted(my_partitions)}, partner_parts={sorted(partner_partitions)}, "
+            f"contract_edges={len(contract_keys)}, output_edges={len(output_edges)}, "
+            f"eq={einsum_eq}, shapes={local_tensor.shape} x {partner_tensor.shape}"
+        )
 
         result = torch.einsum(einsum_eq, local_tensor, partner_tensor)
+        self._current_partitions = union_partitions
+        self._current_boundary_edges = output_edges
 
-        combined_log_scale = my_log_scale + partner_ls.item()
+        partner_log_scale = float(partner_scale_meta[0].item())
+        partner_scale = float(partner_scale_meta[1].item())
+        combined_log_scale = my_log_scale + partner_log_scale
+        combined_scale = my_scale * partner_scale
 
         self.comm.barrier()
 
-        return TNTensor(result, log_scale=combined_log_scale)
+        return TNTensor(result, scale=combined_scale, log_scale=combined_log_scale)
+
+    @staticmethod
+    def _cross_edge_key(edge: Dict[str, Any]) -> Tuple:
+        """Stable key for the two partition views of the same cross edge."""
+        return (
+            edge.get('from_partition'),
+            edge.get('to_partition'),
+            edge.get('from_core_raw'),
+            edge.get('to_core_raw'),
+            edge.get('qubit_idx'),
+            edge.get('edge_rank'),
+        )
+
+    @staticmethod
+    def _edge_other_partition(edge: Dict[str, Any]) -> int:
+        if edge['direction'] == 'out':
+            return edge['to_partition']
+        return edge['from_partition']
+
+    def _boundary_edges_for_partitions(self, partitions) -> List[Dict[str, Any]]:
+        """Return open cross-partition boundaries for a partition group.
+
+        The order intentionally matches RowPriorityStrategy._contract_remaining:
+        all in-boundaries sorted by qubit, then all out-boundaries sorted by
+        qubit.  Tensor dimensions after the batch dimension follow this order.
+        """
+        partition_set = set(partitions)
+        boundary_edges = []
+        for edge in self._contract_plan.inter_node_graph.get('cross_edges', []):
+            from_p = edge['from_partition']
+            to_p = edge['to_partition']
+            if from_p in partition_set and to_p not in partition_set:
+                item = edge.copy()
+                item['direction'] = 'out'
+                item['key'] = self._cross_edge_key(edge)
+                boundary_edges.append(item)
+            elif to_p in partition_set and from_p not in partition_set:
+                item = edge.copy()
+                item['direction'] = 'in'
+                item['key'] = self._cross_edge_key(edge)
+                boundary_edges.append(item)
+
+        direction_order = {'in': 0, 'out': 1}
+        boundary_edges.sort(
+            key=lambda e: (
+                direction_order[e['direction']],
+                e.get('qubit_idx', -1),
+                e.get('from_partition', -1),
+                e.get('to_partition', -1),
+                e.get('from_core_idx', -1),
+                e.get('to_core_idx', -1),
+            )
+        )
+        return boundary_edges
     
     def _get_cross_edges_for_stage(self, stage_idx: int, my_group: int) -> List[Dict]:
         """
@@ -1520,36 +1640,42 @@ class EngineDistributed(EngineCommon):
         import torch
         from ..optim.allreduce_grad import SendRecvGrad
         
-        # Step 1: Pack shape metadata into a single tensor to reduce communication rounds
-        # Format: [ndims, dim0, dim1, ..., dimN]
+        # Step 1: Exchange shape metadata.  Local contraction can expose one
+        # dimension per cross-partition boundary, so the tensor rank is not
+        # bounded by a small constant.
         my_shape = list(tensor.shape)
         n_dims = len(my_shape)
-        
-        # Create metadata tensor: [ndims, shape...]
-        max_dims = 10  # Support up to 10 dimensions
-        my_metadata = torch.zeros(max_dims + 1, dtype=torch.long, device=tensor.device)
-        my_metadata[0] = n_dims
-        my_metadata[1:n_dims+1] = torch.tensor(my_shape, dtype=torch.long, device=tensor.device)
-        
-        partner_metadata = torch.zeros(max_dims + 1, dtype=torch.long, device=tensor.device)
-        
+
         # Use sendrecv pattern: lower rank sends first to avoid deadlock
-        # Single metadata exchange instead of multiple rounds
         tag_metadata = 100
+        tag_shape = 101
         
         try:
+            my_n_dims = torch.tensor([n_dims], dtype=torch.long, device=tensor.device)
+            partner_n_dims_tensor = torch.zeros(1, dtype=torch.long, device=tensor.device)
+
             if self.rank < partner_rank:
-                # I send first, then receive
-                self.comm.send(my_metadata, partner_rank, tag=tag_metadata)
-                self.comm.recv(partner_rank, tag=tag_metadata, tensor=partner_metadata)
+                self.comm.send(my_n_dims, partner_rank, tag=tag_metadata)
+                self.comm.recv(partner_rank, tag=tag_metadata, tensor=partner_n_dims_tensor)
             else:
-                # I receive first, then send
-                self.comm.recv(partner_rank, tag=tag_metadata, tensor=partner_metadata)
-                self.comm.send(my_metadata, partner_rank, tag=tag_metadata)
+                self.comm.recv(partner_rank, tag=tag_metadata, tensor=partner_n_dims_tensor)
+                self.comm.send(my_n_dims, partner_rank, tag=tag_metadata)
+
+            partner_n_dims = int(partner_n_dims_tensor.item())
+            my_shape_tensor = torch.tensor(my_shape, dtype=torch.long, device=tensor.device)
+            partner_shape_tensor = torch.zeros(
+                partner_n_dims, dtype=torch.long, device=tensor.device
+            )
+
+            if self.rank < partner_rank:
+                self.comm.send(my_shape_tensor, partner_rank, tag=tag_shape)
+                self.comm.recv(partner_rank, tag=tag_shape, tensor=partner_shape_tensor)
+            else:
+                self.comm.recv(partner_rank, tag=tag_shape, tensor=partner_shape_tensor)
+                self.comm.send(my_shape_tensor, partner_rank, tag=tag_shape)
             
             # Unpack partner's shape
-            partner_n_dims = int(partner_metadata[0].item())
-            partner_shape = tuple(partner_metadata[1:partner_n_dims+1].tolist())
+            partner_shape = tuple(partner_shape_tensor.tolist())
             
             local_print(f"[Rank {self.rank}] Metadata exchange with rank {partner_rank} successful: "
                        f"my_shape={my_shape}, partner_shape={partner_shape}")
@@ -1668,14 +1794,13 @@ class EngineDistributed(EngineCommon):
         # Ensure local weights require gradients
         for name in self._local_qctn.cores:
             weight = self._local_qctn.cores_weights[name]
-            if isinstance(weight, TNTensor):
-                # weight.tensor.requires_grad_(True)
-                if weight.tensor.grad is not None:
-                    weight.tensor.grad.zero_()
-            elif isinstance(weight, torch.Tensor):
-                # weight.requires_grad_(True)
-                if weight.grad is not None:
-                    weight.grad.zero_()
+            raw = weight.tensor if isinstance(weight, TNTensor) else weight
+            if not isinstance(raw, torch.Tensor):
+                continue
+            if hasattr(raw, 'is_leaf') and not raw.is_leaf:
+                continue
+            if raw.grad is not None:
+                raw.grad.zero_()
 
         result = self.contract_distributed()
 

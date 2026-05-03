@@ -396,7 +396,8 @@ def main():
             optimizer.step(list(grads))
 
         t_step = time.time() - t0
-        lv = float(loss_val)
+        lv_raw = loss_val.detach() if hasattr(loss_val, 'detach') else loss_val
+        lv = float(lv_raw)
         loss_history.append(lv)
         step_times.append(t_step)
 
