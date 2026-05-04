@@ -73,7 +73,7 @@ class State(QCTN):
     """
 
     def __init__(self, nqubits: int, phys_dim: int = 2, backend=None):
-        graph = QCTNHelper.circuit_state(nqubits, phys_dim)
+        graph = QCTNHelper.state(nqubits, phys_dim)
         super().__init__(graph, backend=backend, _defer_init=True)
         self.nqubits_state = nqubits
         self.phys_dim = phys_dim

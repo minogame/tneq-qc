@@ -150,13 +150,15 @@ class StrategyCompiler:
         
         return best['compute_fn'], best['name'], best['cost']
     
-    def register_custom_strategy(self, strategy: ContractionStrategy, modes: List[str]):
+    def register_custom_strategy(self, strategy: ContractionStrategy, modes: List[str] = None):
         """
         Register custom strategy (instance method for runtime registration)
         
         Args:
             strategy: Strategy instance
-            modes: Which modes to register to, e.g. ['balanced', 'full']
+            modes: Deprecated compatibility option. If None, the strategy is
+                only registered by name and can still be selected via
+                ``EngineCommon(strategy=strategy.name)``.
         """
         self.register_strategy(strategy, modes)
 

@@ -282,6 +282,11 @@ class DiscreteDataGenerator:
 
     def _build_projector_table(self, K: int) -> np.ndarray:
         n_values = len(self.values)
+        if K % n_values != 0:
+            raise ValueError(
+                f"K={K} must be divisible by the number of discrete values "
+                f"({n_values}) so projector ones can be split evenly."
+            )
         table = np.zeros((n_values, K, K), dtype=np.float32)
         boundaries = np.linspace(0, K, n_values + 1, dtype=int)
         for idx in range(n_values):

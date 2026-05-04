@@ -128,12 +128,13 @@ class MAELoss(BaseLoss):
 class NLLLoss(BaseLoss):
     """Negative Log Likelihood for generative / classification tasks.
 
-    Handles TNTensor log_scale correction and complex Born rule:
+    Handles TNTensor log_scale correction for probability-valued results:
     1. Extract raw tensor and log_scale from TNTensor.
-    2. For complex tensors, apply Born rule: P = |W|^2.
-    3. For complex TNTensor amplitudes, apply ``2 * log_scale`` because
-       ``|scale * W|^2 = scale^2 * |W|^2``.
-    4. Compute ``-mean(log(P) + scale_correction)``.
+    2. For complex tensors, use the real part as the probability value.
+       This matches BornMachine outputs, which already contract
+       ``tn† · Mx · tn`` and are therefore probabilities/expectations, not
+       amplitudes.
+    3. Compute ``-mean(log(P) + log_scale)``.
     """
 
     EPS: float = 1e-10
@@ -149,14 +150,12 @@ class NLLLoss(BaseLoss):
             log_scale = 0.0
 
         if backend.is_complex(raw):
-            p = backend.real(backend.abs_square(raw))
-            scale_correction = 2.0 * log_scale
+            p = backend.real(raw)
         else:
             p = raw
-            scale_correction = log_scale
 
         p = backend.clamp(p, min=self.EPS)
-        log_p = backend.log(p) + scale_correction
+        log_p = backend.log(p) + log_scale
         return -backend.mean(log_p)
 
 

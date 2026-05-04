@@ -27,6 +27,7 @@ from tneq_qc.core.qctn import QCTN
 from tneq_qc.core.tn_tensor import TNTensor
 from tneq_qc.modules import (
     MPS,
+    State,
     CircuitState,
     MeasureMatrix,
     PlainMPS,
@@ -34,6 +35,7 @@ from tneq_qc.modules import (
     MPS_with_Ref,
     Encoding,
     TNEQ,
+    BornMachine,
     Quadratic,
 )
 from tneq_qc.contractor.einsum_strategy import EinsumStrategy
@@ -114,6 +116,10 @@ class TestSmallModuleInit:
 
     def test_circuit_state_auto_init_populates_cores(self, cs3_init):
         assert len(cs3_init.cores_weights) == cs3_init.ncores == 3
+        for tensor in cs3_init.cores_weights.values():
+            raw = tensor.tensor if isinstance(tensor, TNTensor) else tensor
+            assert torch.allclose(raw.reshape(-1)[0], torch.tensor(1, dtype=raw.dtype))
+            assert torch.allclose(raw.reshape(-1)[1:], torch.zeros_like(raw.reshape(-1)[1:]))
 
     def test_circuit_state_nqubits(self, cs3):
         assert cs3.nqubits == 3
@@ -169,14 +175,14 @@ class TestAppModuleInit:
 
     def test_encoding_submodules(self, backend):
         model = Encoding(nqubits=3, bond_dim=4, backend=backend)
-        assert "circuit" in model._submodules
+        assert "state" in model._submodules
         assert "mps" in model._submodules
-        assert isinstance(model._submodules["circuit"], CircuitState)
+        assert isinstance(model._submodules["state"], State)
         assert isinstance(model._submodules["mps"], MPS)
 
     def test_encoding_all_cores_count(self, backend):
         model = Encoding(nqubits=3, bond_dim=4, backend=backend).auto_init(orthogonal=True)
-        # 3 circuit cores + 2 mps cores = 5 (staggered MPS)
+        # 3 state cores + 2 mps cores = 5 (staggered MPS)
         assert len(model.all_cores) == 5
 
     def test_tneq_submodules(self, backend):
@@ -189,24 +195,24 @@ class TestAppModuleInit:
         # mps1: 2 cores + mps2: 2 cores = 4 (staggered MPS)
         assert len(model.all_cores) == 4
 
-    def test_quadratic_submodules(self, backend):
+    def test_born_machine_submodules(self, backend):
         graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
-        model = Quadratic(graph, 2, backend=backend)
-        assert "circuit" in model._submodules
-        assert "mps" in model._submodules
+        model = BornMachine(graph, 2, backend=backend)
+        assert "state" in model._submodules
+        assert "tn" in model._submodules
         assert "mx" in model._submodules
 
-    def test_quadratic_all_cores_count(self, backend):
+    def test_born_machine_all_cores_count(self, backend):
         graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
-        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
-        # circuit: 3 + mps: 2 + mx: 3 = 8 (staggered MPS)
+        model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
+        # state: 3 + tn: 2 + mx: 3 = 8 (staggered MPS)
         assert len(model.all_cores) == 8
 
-    def test_quadratic_accepts_graph(self, backend):
+    def test_born_machine_accepts_graph(self, backend):
         graph = QCTNHelper.mps(3, bond_dim=4, phys_dim=2)
-        model = Quadratic(graph, 2, backend=backend).auto_init(orthogonal=True)
-        assert model._submodules["mps"].graph is not None
-        assert model._submodules["mps"].nqubits == 3
+        model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
+        assert model._submodules["tn"].graph is not None
+        assert model._submodules["tn"].nqubits == 3
 
     def test_quadratic_requires_graph(self, backend):
         with pytest.raises(ValueError, match="non-None graph string"):
@@ -440,7 +446,7 @@ class TestComplexChunkConcat:
 
     # 1b. MPS + Tree concat
     def test_mps_tree_concat(self, backend):
-        tree_graph = QCTNHelper.generate_example_graph(n=4, graph_type="tree")
+        tree_graph = QCTNHelper.generate_example_graph(n=4, graph_type="tree", dim_char="2")
         mps  = MPS(nqubits=4, bond_dim=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         tree = QCTN(tree_graph, backend=backend)
         merged = QCTN.concat(mps, tree)

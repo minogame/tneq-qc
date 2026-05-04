@@ -284,7 +284,34 @@ class EngineCommon:
             return ident
         return TNTensor(ident)
 
-    def calculate_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
+    def _snapshot_cores(self, qctn, names: List[str]) -> Dict[str, Any]:
+        return {name: qctn[name] for name in names}
+
+    def _restore_cores(self, qctn, snapshot: Dict[str, Any]) -> None:
+        for name, tensor in snapshot.items():
+            qctn[name] = tensor
+
+    def _result_to_probability_tensor(self, result):
+        """Convert a contraction result with probability semantics to a real tensor."""
+        if isinstance(result, TNTensor):
+            val = result.tensor * result.scale
+        else:
+            val = result
+
+        # BornMachine already contracts tn† · Mx · tn, so the result is an
+        # expectation value/probability. Complex dtype only reflects the tensor
+        # representation; do not apply another |.|^2 here.
+        if hasattr(val, 'is_complex') and val.is_complex():
+            val = val.real
+        return val
+
+    def calculate_probability(
+        self,
+        qctn,
+        mx_dict: Dict[str, Any],
+        *,
+        restore: bool = True,
+    ) -> float:
         """Calculate probability by updating mx cores and contracting.
 
         Full probability: *mx_dict* covers all mx cores.
@@ -299,20 +326,16 @@ class EngineCommon:
         Returns:
             float: Scalar probability value.
         """
-        for name, tensor in mx_dict.items():
-            qctn[name] = tensor
+        snapshot = self._snapshot_cores(qctn, list(mx_dict)) if restore else {}
+        try:
+            for name, tensor in mx_dict.items():
+                qctn[name] = tensor
 
-        result = self.contract(qctn)
-
-        if isinstance(result, TNTensor):
-            result.scale_to(1.0)
-            val = result.tensor
-        else:
-            val = result
-
-        # Born rule: complex → real probability |W|².
-        if hasattr(val, 'is_complex') and val.is_complex():
-            val = (val * val.conj()).real
+            result = self.contract(qctn)
+            val = self._result_to_probability_tensor(result)
+        finally:
+            if restore:
+                self._restore_cores(qctn, snapshot)
 
         return float(val.item()) if hasattr(val, 'item') else float(val)
 
@@ -327,10 +350,15 @@ class EngineCommon:
 
     def marginal_probability(self, qctn, mx_dict: Dict[str, Any]) -> float:
         """Calculate marginal probability; unspecified mx cores trace out."""
-        for name in self._mx_core_names(qctn):
-            if name not in mx_dict:
-                qctn[name] = self._identity_for_core(qctn, name)
-        return self.calculate_probability(qctn, mx_dict)
+        mx_names = self._mx_core_names(qctn)
+        snapshot = self._snapshot_cores(qctn, mx_names)
+        try:
+            for name in mx_names:
+                if name not in mx_dict:
+                    qctn[name] = self._identity_for_core(qctn, name)
+            return self.calculate_probability(qctn, mx_dict, restore=False)
+        finally:
+            self._restore_cores(qctn, snapshot)
 
     # ============================================================================
     # Sampling
@@ -366,6 +394,8 @@ class EngineCommon:
         Returns:
             Tensor of shape ``(num_samples, len(sample_core_names))``.
         """
+        initial_cores = self._snapshot_cores(qctn, sample_core_names)
+
         # Infer K from the first sample core.
         first_core = qctn[sample_core_names[0]]
         raw_first = first_core.tensor if isinstance(first_core, TNTensor) else first_core
@@ -449,19 +479,9 @@ class EngineCommon:
                 qctn[other_name] = saved
 
             # F: Extract density → CDF → inverse CDF sample.
-            if isinstance(result, TNTensor):
-                result_raw = result.tensor
-            else:
-                result_raw = result
-            if isinstance(result_raw, TNTensor):
-                result_raw = result_raw.tensor
-
-            density = result_raw.reshape(num_samples, grid_size)
-            # Born rule: |W|² → real non-negative density.
-            if hasattr(density, 'is_complex') and density.is_complex():
-                density = (density * density.conj()).real
-            else:
-                density = density.abs().square()
+            density = self._result_to_probability_tensor(result).reshape(
+                num_samples, grid_size
+            )
             density = density.clamp(min=0.0)
 
             cdf = density.cumsum(dim=1)
@@ -501,6 +521,7 @@ class EngineCommon:
                 )
                 qctn[core_name] = mx_list_y[0]
 
+        self._restore_cores(qctn, initial_cores)
         return samples
 
     def sample_discrete(
@@ -514,6 +535,8 @@ class EngineCommon:
     ):
         """Sample discrete values by enumerating candidate measurement cores."""
         import numpy as np
+
+        initial_cores = self._snapshot_cores(qctn, sample_core_names)
 
         if values is None:
             values = getattr(data_generator, "values", None)
@@ -559,11 +582,8 @@ class EngineCommon:
                 for other_name, saved in saved_cores.items():
                     qctn[other_name] = saved
 
-                result_raw = result.tensor if isinstance(result, TNTensor) else result
-                if hasattr(result_raw, 'is_complex') and result_raw.is_complex():
-                    result_raw = (result_raw * result_raw.conj()).real
-                else:
-                    result_raw = result_raw.abs().square()
+                result_raw = self._result_to_probability_tensor(result)
+                result_raw = result_raw.clamp(min=0.0)
                 prob_columns.append(np.asarray(self.backend.tensor_to_numpy(result_raw)).reshape(num_samples))
 
             qctn[core_name] = saved_current
@@ -594,4 +614,5 @@ class EngineCommon:
         raw_samples = samples.tensor if isinstance(samples, TNTensor) else samples
         if hasattr(raw_samples, 'is_complex') and raw_samples.is_complex():
             raw_samples = raw_samples.real
+        self._restore_cores(qctn, initial_cores)
         return raw_samples
