@@ -1,6 +1,6 @@
 """Born machine training: 1024-qubit MPS with correlated Gaussian data.
 
-Structure: circuit + mps + mx + mps_h + circuit_bra
+Structure: state + mps + mx + mps_h + state_bra
 Data: MultivariateNormal with tridiagonal covariance (nearest-neighbor correlation 0.2)
 dtype: complex64, CPU
 
@@ -56,8 +56,8 @@ def make_correlated_gaussian_sampler(ndim):
     return sample_fn
 
 
-def init_circuit_01(qctn: QCTN, backend) -> QCTN:
-    """Fill each circuit core with an alternating 0/1 pattern."""
+def init_state_basis(qctn: QCTN, backend) -> QCTN:
+    """Fill each state core with an alternating 0/1 pattern."""
     for core_info in qctn.adjacency_table:
         core_name = core_info['core_name']
         shape = tuple(core_info['input_shape'] + core_info['output_shape'])

@@ -269,7 +269,7 @@ class QCTNHelper:
 
                 return graph.rstrip()
 
-            def generate_circuit_graph(n, dim_char='2'):
+            def generate_state_graph(n, dim_char='2'):
                 graph = ""
                 import opt_einsum
                 char_list = [opt_einsum.get_symbol(i) for i in range(n)]
@@ -304,8 +304,8 @@ class QCTNHelper:
                 # Default to n layers if not specified
                 L = 4
                 return generate_wall_graph(n, L, dim_char)
-            elif graph_type in ("state", "circuit"):
-                return generate_circuit_graph(n, dim_char)
+            elif graph_type == "state":
+                return generate_state_graph(n, dim_char)
             elif graph_type == "mx":
                 return generate_mx_graph(n, dim_char)
 
@@ -445,13 +445,13 @@ class QCTNHelper:
         ]
         return "\n".join(rows)
     @staticmethod
-    def circuit_state(nqubits, phys_dim=2):
-        """Generate a circuit-state graph: each qubit has one core, no left input dim.
+    def state(nqubits, phys_dim=2):
+        """Generate a product-state graph: one core per qubit, no left input dim.
 
         Each qubit line has a single core with only a right (output) edge of
         ``phys_dim``.  This corresponds to a vector (ket) state.
 
-        Example — ``circuit_state(3, phys_dim=2)``::
+        Example — ``state(3, phys_dim=2)``::
 
             -A-2-
             -B-2-
@@ -470,23 +470,15 @@ class QCTNHelper:
         return '\n'.join(f'-{c}-{p}-' for c in char_list)
 
     @staticmethod
-    def state(nqubits, phys_dim=2):
-        """Generate a product-state graph.
-
-        Alias for :meth:`circuit_state`; ``state`` is the preferred public name.
-        """
-        return QCTNHelper.circuit_state(nqubits, phys_dim)
-
-    @staticmethod
-    def circuit_bra(nqubits, phys_dim=2):
-        """Generate a circuit-bra graph: each qubit has one core, left input dim only.
+    def state_bra(nqubits, phys_dim=2):
+        """Generate a product-state bra graph: one core per qubit, left input dim only.
 
         Each qubit line has a single core with only a left (input) edge of
         ``phys_dim`` and no right (output) edge.  This corresponds to a row
         vector (bra) state ``⟨ψ|`` that closes the right boundary of the
         preceding component.
 
-        Example — ``circuit_bra(3, phys_dim=2)``::
+        Example — ``state_bra(3, phys_dim=2)``::
 
             -2-A-
             -2-B-

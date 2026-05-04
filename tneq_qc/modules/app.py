@@ -222,6 +222,3 @@ class BornMachine(QCTN):
             if combined.core_names.get(sym, '').startswith('mx.')
         ]
 
-
-class Quadratic(BornMachine):
-    """Backward-compatible alias for :class:`BornMachine`."""

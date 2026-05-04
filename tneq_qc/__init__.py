@@ -12,14 +12,13 @@ from .optim import (
     create_optimizer,
 )
 from .losses import LossRegistry, BaseLoss
-from .modules.app import BornMachine, Quadratic, TNEQ, Encoding, PlainMPS
-from .modules.small import State, CircuitState
+from .modules.app import BornMachine, TNEQ, Encoding, PlainMPS
+from .modules.small import State
 from .contractor import (
     ContractionStrategy,
     StrategyCompiler,
     register_contraction_strategy,
     get_registered_contraction_strategies,
-    get_contraction_strategy_modes,
 )
 
 __all__ = [
@@ -29,9 +28,8 @@ __all__ = [
     "ParamRef", "TensorOps", "BackendTensorOps",
     "register_optimizer", "get_registered_optimizers", "create_optimizer",
     "LossRegistry", "BaseLoss",
-    "State", "CircuitState",
-    "BornMachine", "Quadratic", "TNEQ", "Encoding", "PlainMPS",
+    "State",
+    "BornMachine", "TNEQ", "Encoding", "PlainMPS",
     "ContractionStrategy", "StrategyCompiler",
     "register_contraction_strategy", "get_registered_contraction_strategies",
-    "get_contraction_strategy_modes",
 ]

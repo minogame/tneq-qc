@@ -34,7 +34,7 @@ LR         = 0.01
 LOG_EVERY  = 10
 N_SAMPLES  = 2000
 SAVE_DIR   = "checkpoints"
-ASSETS_DIR = "assets/quadratic"
+ASSETS_DIR = "assets/born_machine"
 GRAPH      = "\n".join([
     "-2-a--2-b-------------2-",
     "-2-a--2-b--2-c--------2-",
@@ -177,7 +177,7 @@ def main():
     # Save model (save the mps submodule which has the trainable params)
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
-    save_path = os.path.join(SAVE_DIR, "quadratic_tn.safetensors")
+    save_path = os.path.join(SAVE_DIR, "born_machine_tn.safetensors")
     model._submodules['tn'].save_cores(save_path, metadata={
         'n_qubits': str(N_QUBITS),
         'dim': str(DIM),

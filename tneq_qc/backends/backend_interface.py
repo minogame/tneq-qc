@@ -53,7 +53,11 @@ class ComputeBackend(ABC):
     gradient computation, and JIT compilation.
     """
     
-    def __init__(self, tensor_type: Optional[str] = ""):
+    def __init__(
+        self,
+        tensor_type: Optional[str] = "",
+        enable_auto_scale: bool = False,
+    ):
         """Initialize backend with BackendInfo.
 
         Args:
@@ -61,9 +65,12 @@ class ComputeBackend(ABC):
                 wrapper to use.  Currently supported: ``"TNTensor"``.
                 When set, :meth:`get_tensor_type` returns the wrapper class
                 and :meth:`init_random_core` automatically wraps results.
+            enable_auto_scale: If True, contraction code may normalize
+                TNTensor intermediates via :meth:`TNTensor.auto_scale`.
         """
         self.backend_info: Optional[BackendInfo] = None
         self._tensor_type_name: Optional[str] = tensor_type
+        self.enable_auto_scale = bool(enable_auto_scale)
 
     # ------------------------------------------------------------------
     # TNTensor helpers
@@ -97,6 +104,12 @@ class ComputeBackend(ABC):
         from ..core.tn_tensor import TNTensor
         if isinstance(tensor, TNTensor):
             return tensor.tensor
+        return tensor
+
+    def maybe_auto_scale(self, tensor):
+        """Apply TNTensor.auto_scale only when this backend enables it."""
+        if self.enable_auto_scale and hasattr(tensor, "auto_scale"):
+            tensor.auto_scale()
         return tensor
 
     @abstractmethod
@@ -552,17 +565,20 @@ class ComputeBackend(ABC):
             return self.einsum(equation, *operands)
 
         result_scale = 1.0
+        result_log_scale = 0.0
         raw_ops = []
         for op in operands:
             if isinstance(op, TNTensor):
                 result_scale *= op.scale
+                result_log_scale += op.log_scale
                 raw_ops.append(op.tensor)
             else:
                 raw_ops.append(op)
 
-        import math
         raw_result = self.einsum(equation, *raw_ops)
-        return TNTensor(raw_result, scale=result_scale)
+        return self.maybe_auto_scale(
+            TNTensor(raw_result, scale=result_scale, log_scale=result_log_scale)
+        )
 
     def tn_reshape(self, tensor, shape) -> "Any":
         """Backend reshape that transparently handles TNTensor inputs.

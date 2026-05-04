@@ -53,7 +53,7 @@ def load_mnist_image(idx=0, size=32):
 
 torch.manual_seed(42)
 backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
-engine  = EngineCommon(backend=backend, strategy_mode='full')
+engine  = EngineCommon(backend=backend, strategy="row_priority")
 
 # Graph definition: all qubits share a single core A
 graph = "\n".join(["-2-A-2-"] * N_QUBITS)
@@ -245,4 +245,4 @@ print(f"Max reload error: {max_err:.2e}")   # should be close to 0
 | Optimizer | Adam (suited for non-convex optimization) |
 | Data | No external data flow; model1 is fixed as target |
 | dtype | float32 (image data is real-valued) |
-| strategy_mode | `'full'` (small-scale network) |
+| strategy | `'full'` (small-scale network) |

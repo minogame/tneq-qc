@@ -32,18 +32,18 @@ When $A = B$, this degenerates to the norm $\|A\|^2$.
 - **Learning objective**: Approximate the Frobenius inner product structure of a target matrix $M$ using the inner product of two small TNs
 - **Characteristics**: No external data input, pure parameter optimization; suitable for unsupervised density matrix learning
 
-### 2.2 Objective Two: Quadratic Form
+### 2.2 Objective Two: BornMachine Form
 
-The quadratic form introduces a data-dependent measurement operator $M_x$ on top of TNEQ:
+The BornMachine introduces a data-dependent measurement operator $M_x$ on top of TNEQ:
 
 $$\mathcal{L}(x) = \langle \psi(x) | A^\dagger \cdot M_x \cdot A | \psi(x) \rangle = \mathrm{tr}\!\left(A \cdot M_x \cdot A^\dagger\right)$$
 
 Where:
-- $|\psi(x)\rangle$: Input state (CircuitState), encoding sample features $x$ into a quantum state
+- $|\psi(x)\rangle$: Input state (State), encoding sample features $x$ into a quantum state
 - $A$: Small tensor network parameters (MPS or other structures), trainable; $A^\dagger$ is its zero-copy conjugate transpose
 - $M_x$: Measurement matrix generated from input $x$ (e.g., Hermite polynomial basis expansion), representing the data-dependent part of the "large matrix"
 
-- **Corresponding module**: `Quadratic` (CS + MPS + Mx + MPS† + CS†)
+- **Corresponding module**: `BornMachine` (CS + MPS + Mx + MPS† + CS†)
 - **Learning objective**: Use a small TN $A$ to learn a low-rank factorization of a high-dimensional operator $M$, so that $\mathcal{L}(x)$ fits the supervised signal
 - **Characteristics**: Data-driven measurement matrix; suitable for supervised/semi-supervised quantum-inspired classification and regression
 
@@ -72,17 +72,17 @@ The above example is a 5-qubit TensorNetwork with 5 core tensors A, B, C, D, E. 
 │                            Application Layer                                │
 │                                                                             │
 │            ┌────────────────────────┐        ┌────────────────┐             │
-│            │  Trainer / Distribute  │        │   Inference    │             │
+│            │  Train  /  Distribute  │        │   Inference    │             │
 │            └──────┬────────┬────────┘        └───────┬────────┘             │
 └───────────────────┼────────┼─────────────────────────┼──────────────────────┘
                     │        │                         │
           ┌─────────┘        └──────────┐              │
           ▼                            ▼               ▼
 ┌──────────────────────┐    ┌──────────────────────────────────────────────────┐
-│      Training        │    │                     Engine                       │
+│      Train Utils     │    │                     Engine                       │
 │                      │    │                                                  │
 │  ┌────────────────┐  │    │   ┌──────────┐    ┌──────────┐    ┌──────────┐   │
-│  │   Optimizer    │  │───▶│   │ TNEQ_QC  │    │ Quadratic│    │  Trace   │   │
+│  │   Optimizer    │  │───▶│   │ TNEQ_QC  │    │ BornMachine│    │  Trace   │   │
 │  ├────────────────┤  │    │   └─────┬────┘    └─────┬────┘    └─────┬────┘   │
 │  │     Loss       │  │    │         └───────────────┼───────────────┘        │
 │  └───────┬────────┘  │    │                (defined via QCTN)                │
@@ -95,7 +95,7 @@ The above example is a 5-qubit TensorNetwork with 5 core tensors A, B, C, D, E. 
            │              │   TNGraph ──(init)──▶ ┌──────────────────────┐     │
            │              │                       │        QCTN          │     │
            │              │                       │  ┌────────────────┐  │     │
-           │              │                       │  │  CircuitState  │  │     │
+           │              │                       │  │  State  │  │     │
            │              │                       │  │  MeasureMx     │  │     │
            │              │                       │  └────────────────┘  │     │
            │              │                       └────┬────────────┬────┘     │
@@ -157,9 +157,9 @@ MPS(nqubits=3, bond_dim=4, phys_dim=2)
     Graph: -2-A-4-B-4-C-2-   (3 identical rows)
     Physical meaning: Matrix Product State, bond dimension controls entanglement capacity
 
-CircuitState(nqubits=3, phys_dim=2)
+State(nqubits=3, phys_dim=2)
     Graph: -A-2- / -B-2- / -C-2-
-    Physical meaning: Input quantum state |ψ⟩, each qubit independent
+    Physical meaning: Input quantum state |ψ⟩, auto-initialized as [1, 0, ..., 0]
 
 MeasureMatrix(nqubits=3, phys_dim=2)
     Graph: -2-A-2- / -2-B-2- / -2-C-2-
@@ -175,16 +175,21 @@ Application modules combine leaf modules into complete computational graphs usin
 | `PlainMPS` | Single MPS | $\langle A \rangle$ (core norm) |
 | `TransposeMPS` | Zero-copy conjugate transpose view of MPS | $A^\dagger$ (parameter sharing) |
 | `MPS_with_Ref` | left MPS + right = left† | $\|A\|^2$ (symmetric normalization) |
-| `Encoding` | CircuitState + MPS | $A|\psi\rangle$ (feature encoding) |
+| `Encoding` | State + MPS | $A|\psi\rangle$ (feature encoding) |
 | `TNEQ` | MPS_L + MPS_R (independent parameters) | $\langle\phi\|\psi\rangle$ (inner product) |
-| `Quadratic` | CS + MPS + Mx + MPS† + CS† | $\langle\psi\|A^\dagger M_x A\|\psi\rangle$ (quadratic form) |
+| `BornMachine` | State + TN + Mx + TN† + State† | $\langle\psi\|A^\dagger M_x A\|\psi\rangle$ (Born probability) |
+
+`BornMachine(graph, dim, backend=..., mx_graph=None)` uses one local `dim x dim`
+Mx core per qubit by default. To make an Mx core span multiple qubits, provide a
+custom `mx_graph` whose core symbol appears on multiple qubit rows, or build the
+Mx QCTN manually and compose the five segments with `QCTN.concat()`.
 
 ### 4.3 Horizontal Composition: concat and chunk
 
 QCTN supports **horizontal concatenation** (concat) and **splitting** (chunk), enabling flexible module assembly:
 
 ```
-concat(CircuitState[3], MPS[3, bond=4], MeasureMatrix[3]):
+concat(State[3], MPS[3, bond=4], MeasureMatrix[3]):
 
 CS  (3 qubits, 1 core/qubit):   MPS (3 qubits, 3 cores):   MX (3 qubits, 1 core/qubit):
   -a-2-                           -2-a-4-b-4-c-2-              -2-a-2-
@@ -215,7 +220,7 @@ Tensor network contraction is the process of combining multiple tensors via Eins
 
 ### 5.2 Symmetric Expansion
 
-When computing the quadratic form $\langle \psi | A^\dagger M_x A | \psi \rangle$, the tensor network expands into 5 columns (left-middle-right):
+When computing the BornMachine $\langle \psi | A^\dagger M_x A | \psi \rangle$, the tensor network expands into 5 columns (left-middle-right):
 
 ```
 CIRCUIT  LEFT (A)    MIDDLE (Mx)    RIGHT (A_T)   CIRCUIT
@@ -260,6 +265,19 @@ $$\text{true value} = \text{tensor} \times \text{scale}$$
 - **Gradient proxy**: `requires_grad`, `grad`, `detach()`, `backward()` delegate directly to the underlying tensor
 - **Transparent arithmetic**: Supports `+`, `-`, `*`, `/`, `@`, `**` and other operators, automatically managing scale propagation
 
+Contraction-time auto scaling is backend-controlled and disabled by default:
+
+```python
+backend = BackendFactory.create_backend(
+    "pytorch",
+    device="cpu",
+    dtype="complex64",
+    enable_auto_scale=True,
+)
+```
+
+When enabled, supported contraction paths normalize TNTensor intermediate results while preserving `tensor * scale`.
+
 ---
 
 ## 7. Backend Abstraction
@@ -285,18 +303,19 @@ class ComputeBackend:
 
 ```python
 from tneq_qc import (
-    QCTN, EngineCommon, BackendFactory, Quadratic,
-    DataGenerator, make_data_fn, SGDG,
+    QCTN, QCTNHelper, EngineCommon, BackendFactory, BornMachine,
+    DataGenerator, SGDG,
 )
 
 # 1. Create backend and engine
 backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-engine   = EngineCommon(backend=backend, strategy_mode='full')
+engine   = EngineCommon(backend=backend, strategy='row_priority')
 data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
 # 2. Build model
-model = Quadratic(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
-model._submodules['mps'].requires_grad_(True)
+graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
+model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
+model._submodules['tn'].requires_grad_(True)
 combined = model.build()
 
 # 3. Create optimizer and data function
@@ -390,7 +409,7 @@ from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
 
 engine = EngineDistributed(
     backend=backend,
-    strategy_mode='full',
+    strategy="row_priority",
     comm=comm,
     partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
 )
@@ -443,8 +462,8 @@ tneq_qc/
 │   ├── backend_pytorch.py     # PyTorch implementation
 │   └── backend_jax.py         # JAX implementation
 ├── modules/                   # Predefined modules
-│   ├── small.py               # MPS / CircuitState / MeasureMatrix
-│   └── app.py                 # Quadratic / TNEQ / Encoding / PlainMPS
+│   ├── small.py               # MPS / State / MeasureMatrix
+│   └── app.py                 # BornMachine / TNEQ / Encoding / PlainMPS
 ├── optim/                     # Optimizers
 │   ├── base.py                # OptimizerBase
 │   ├── optimizers.py          # Adam / SGD / SGDG / Momentum / RMSProp

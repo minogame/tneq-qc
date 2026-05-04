@@ -39,7 +39,7 @@ LR       = 0.01    # Learning rate
 
 # 1. Create backend and engine
 backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
-engine  = EngineCommon(backend=backend, strategy_mode='full')
+engine  = EngineCommon(backend=backend, strategy="row_priority")
 
 # 2. Define graph (one independent core per qubit)
 graph = "\n".join(

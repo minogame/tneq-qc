@@ -22,7 +22,7 @@ def backend():
 
 @pytest.fixture(scope="module")
 def engine(backend):
-    return EngineCommon(backend=backend, strategy_mode="full")
+    return EngineCommon(backend=backend, strategy="row_priority")
 
 
 def _val(result):

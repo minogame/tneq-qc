@@ -165,20 +165,5 @@ class TestBackwardCompatibility:
 
         assert result.ncores == q1.ncores + q2.ncores + q3.ncores
 
-    def test_merge_still_works(self, backend):
-        """Test that deprecated merge() still works."""
-        graph1 = "-2-A-2-"
-        graph2 = "-2-B-2-"
-
-        q1 = QCTN(graph1, backend=backend)
-        q2 = QCTN(graph2, backend=backend)
-
-        # merge() should still work but emit deprecation warning
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            result = QCTN.merge(q1, q2)
-
-        assert result.ncores == q1.ncores + q2.ncores
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

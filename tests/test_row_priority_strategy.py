@@ -202,12 +202,52 @@ class TestRowPriorityStrategy:
         assert "row_priority" in strategies
 
     def test_engine_fn_ignores_all_args(self, qctn_2bit):
-        """Engine adapter must accept and ignore cores_dict / circuit / measure args."""
+        """Engine adapter must accept and ignore optional state / measure args."""
         backend = qctn_2bit.backend
         row_fn = RowPriorityStrategy().get_compute_function(qctn_2bit, {}, backend)
-        cs = [torch.randn(3), torch.randn(3)]
+        state_inputs = [torch.randn(3), torch.randn(3)]
         mx = [torch.randn(10, 3, 3), torch.randn(10, 3, 3)]
-        # Both calls must return the same value regardless of cs/mx
+        # Both calls must return the same value regardless of state/mx.
         result_none = row_fn(qctn_2bit.cores_weights, None, None)
-        result_with = row_fn(qctn_2bit.cores_weights, cs, mx)
+        result_with = row_fn(qctn_2bit.cores_weights, state_inputs, mx)
+        if isinstance(result_none, TNTensor):
+            result_none = result_none.tensor * result_none.scale
+        if isinstance(result_with, TNTensor):
+            result_with = result_with.tensor * result_with.scale
         assert torch.allclose(result_none, result_with)
+
+    def test_auto_scale_disabled_by_default(self):
+        backend = BackendFactory.create_backend("pytorch", device="cpu", dtype="float32")
+        assert backend.enable_auto_scale is False
+
+        qctn = QCTN("-2-A-2-B-2-", backend=backend)
+        qctn.cores_weights["A"] = TNTensor(torch.eye(2) * 2.0)
+        qctn.cores_weights["B"] = TNTensor(torch.eye(2) * 3.0)
+
+        row_fn = RowPriorityStrategy().get_compute_function(qctn, {}, backend)
+        result = row_fn(qctn.cores_weights, None, None)
+
+        assert isinstance(result, TNTensor)
+        assert torch.allclose(result.tensor, torch.eye(2) * 6.0)
+        assert result.scale == 1.0
+
+    def test_backend_auto_scale_enabled_preserves_effective_value(self):
+        backend = BackendFactory.create_backend(
+            "pytorch",
+            device="cpu",
+            dtype="float32",
+            enable_auto_scale=True,
+        )
+        assert backend.enable_auto_scale is True
+
+        qctn = QCTN("-2-A-2-B-2-", backend=backend)
+        qctn.cores_weights["A"] = TNTensor(torch.eye(2) * 2.0)
+        qctn.cores_weights["B"] = TNTensor(torch.eye(2) * 3.0)
+
+        row_fn = RowPriorityStrategy().get_compute_function(qctn, {}, backend)
+        result = row_fn(qctn.cores_weights, None, None)
+
+        assert isinstance(result, TNTensor)
+        assert torch.allclose(result.tensor, torch.eye(2))
+        assert result.scale == 6.0
+        assert torch.allclose(result.tensor * result.scale, torch.eye(2) * 6.0)

@@ -14,7 +14,8 @@ class BackendPyTorch(ComputeBackend):
     """PyTorch computational backend."""
 
     def __init__(self, device: Optional[str] = None, dtype: Optional[Any] = None,
-                 tensor_type: Optional[str] = None):
+                 tensor_type: Optional[str] = None,
+                 enable_auto_scale: bool = False):
         """
         Initialize PyTorch backend.
         
@@ -27,8 +28,13 @@ class BackendPyTorch(ComputeBackend):
                 Pass ``"TNTensor"`` to have :meth:`init_random_core` return
                 :class:`TNTensor` instances and :meth:`get_tensor_type` report
                 ``TNTensor``.
+            enable_auto_scale (bool): Enable contraction-time TNTensor
+                auto-scaling. Defaults to False.
         """
-        super().__init__(tensor_type=tensor_type)
+        super().__init__(
+            tensor_type=tensor_type,
+            enable_auto_scale=enable_auto_scale,
+        )
         try:
             import torch
             self.torch = torch
@@ -45,6 +51,7 @@ class BackendPyTorch(ComputeBackend):
                 'pytorch',
                 device=device,
                 dtype=self._dtype_to_string(self.default_dtype),
+                enable_auto_scale=self.enable_auto_scale,
             )
         except ImportError:
             raise ImportError("PyTorch is not installed. Please install it with: pip install torch")

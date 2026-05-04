@@ -299,7 +299,7 @@ model._submodules["mps"].requires_grad_(True)
 ```python
 from tneq_qc import EngineCommon, StepLRScheduler, create_optimizer
 
-engine = EngineCommon(backend=backend, strategy_mode="full")
+engine = EngineCommon(backend=backend, strategy="row_priority")
 optimizer = create_optimizer(
     "sgdg",
     combined.parameters(),
@@ -356,7 +356,7 @@ from tneq_qc.optim.optimizer import Optimizer
 
 | Task Type | Recommended Optimizer | Reason |
 |---|---|---|
-| Density estimation (Quadratic + NLL) | `sgdg` | Orthogonality constraints preserve normalization |
+| Density estimation (BornMachine + NLL) | `sgdg` | Orthogonality constraints preserve normalization |
 | TNEQ inner-product matching | `sgdg` | Helps control scale and geometry |
 | MNIST approximation | `adam` | Good default for unconstrained fitting |
 | Debugging / sanity checks | `sgd` | Simplest update rule |

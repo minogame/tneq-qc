@@ -10,7 +10,6 @@ Now supports strategy-based compilation for optimized contraction paths.
 from __future__ import annotations
 from enum import Enum, auto
 from typing import Callable, Optional, Union, List, Tuple, Dict, Any
-import warnings
 
 from tqdm import tqdm
 
@@ -61,10 +60,9 @@ class EngineCommon:
         self,
         backend: Optional[Union[str, ComputeBackend]] = None,
         strategy: Union[str, List[str], None] = None,
-        strategy_mode: Optional[str] = None,
         nqubits: Optional[int] = None,
     ):
-        """Initialize the engine with a specific backend and strategy mode.
+        """Initialize the engine with a specific backend and contraction strategy.
 
         Args:
             backend (str or ComputeBackend, optional): Backend to use.
@@ -73,12 +71,6 @@ class EngineCommon:
                 instance.  Defaults to the framework default backend.
             strategy (str or list[str]): Strategy name, or a list of candidate
                 strategy names. Defaults to ``'row_priority'``.
-            strategy_mode (str): Deprecated contraction strategy mode:
-
-                - ``'fast'``: einsum only (fastest compilation)
-                - ``'balanced'``: row-priority only (default)
-                - ``'full'``: row-priority only
-
             nqubits (int, optional): Total number of qubits.  If ``None``
                 (default), inferred from the QCTN at contraction time.
 
@@ -93,29 +85,14 @@ class EngineCommon:
         else:
             self.backend = backend
 
-        if strategy is None and strategy_mode is None:
+        if strategy is None:
             strategy = 'row_priority'
-        elif strategy is not None and strategy_mode is not None:
-            warnings.warn(
-                "Both strategy and strategy_mode were provided; strategy takes precedence.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif strategy_mode is not None:
-            warnings.warn(
-                "strategy_mode is deprecated; pass strategy='row_priority' or "
-                "strategy='einsum_default' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
 
         self.contractor = EinsumStrategy()
         self.strategy_compiler = StrategyCompiler(
             strategy=strategy,
-            mode=None if strategy is not None else strategy_mode,
         )
         self.strategy = self.strategy_compiler.strategy_key
-        self.strategy_mode = strategy_mode
 
         self._nqubits: Optional[int] = nqubits
         self._qubit_ops: Dict[int, QubitOp] = {}

@@ -53,19 +53,21 @@ print(qctn.cores)      # ['A', 'B', 'C']
 ### 2.2 Using Predefined Modules
 
 ```python
-from tneq_qc.modules.small import MPS, CircuitState, MeasureMatrix
+from tneq_qc.modules.small import MPS, State, MeasureMatrix
 
 mps = MPS(nqubits=4, bond_dim=8, phys_dim=2, backend=backend).auto_init()
-cs  = CircuitState(nqubits=4, phys_dim=2, backend=backend).auto_init()
-mx  = MeasureMatrix(nqubits=4, phys_dim=2, backend=backend).auto_init()
+state = State(nqubits=4, phys_dim=2, backend=backend).auto_init()
+mx = MeasureMatrix(nqubits=4, phys_dim=2, backend=backend).auto_init()
 ```
 
 ### 2.3 Using Application Modules
 
 ```python
-from tneq_qc import Quadratic
+from tneq_qc import BornMachine
+from tneq_qc import QCTNHelper
 
-model = Quadratic(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
+graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
+model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
 combined = model.build()  # Returns the complete QCTN after concat
 ```
 
@@ -111,11 +113,11 @@ Horizontally concatenate multiple QCTNs into a single complete network:
 ```python
 # Named concatenation (recommended)
 combined = QCTN.concat([
-    ('cs',   circuit_state),
-    ('tn',   mps),
-    ('mx',   measure_matrix),
-    ('tn_h', mps.hermit()),
-    ('cs_t', circuit_state.bra()),
+    ('state', state),
+    ('tn', tn),
+    ('mx', mx),
+    ('tn_h', tn.hermit()),
+    ('state_t', state.bra()),
 ])
 
 # After concatenation, access cores via readable names
@@ -126,8 +128,8 @@ combined['mx.a']  # Access the first core of the measure matrix
 ### 4.3 hermit / bra (Conjugate Transpose)
 
 ```python
-mps_h = mps.hermit()    # Zero-copy conjugate transpose view
-cs_bra = cs.bra()       # Same as above, named following quantum mechanics convention
+tn_h = tn.hermit()        # Zero-copy conjugate transpose view
+state_bra = state.bra()   # Bra state used to close the right boundary
 
 # The hermit view shares parameters with the original QCTN
 # Modifying the original parameters is automatically reflected in the hermit view
@@ -192,6 +194,17 @@ t.auto_scale()        # Normalize tensor so that max|·| = 1
 t.scale_to(target)    # Adjust scale so that tensor * scale = target * old_tensor
 ```
 
+Automatic scaling during contraction is disabled by default. Enable it on the backend when needed:
+
+```python
+backend = BackendFactory.create_backend(
+    "pytorch",
+    device="cpu",
+    dtype="complex64",
+    enable_auto_scale=True,
+)
+```
+
 ### 5.2 Reference Semantics
 
 ```python
@@ -221,18 +234,19 @@ a.shape           # Proxied to the underlying tensor
 
 ## 6. Typical Usage Patterns
 
-### 6.1 Quadratic Model (Complete Workflow)
+### 6.1 BornMachine Model (Complete Workflow)
 
 ```python
-from tneq_qc import QCTN, BackendFactory, Quadratic, EngineCommon, DataGenerator, make_data_fn, SGDG
+from tneq_qc import QCTNHelper, BackendFactory, BornMachine, EngineCommon, DataGenerator, make_data_fn, SGDG
 
 backend  = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
-engine   = EngineCommon(backend=backend, strategy_mode='full')
+engine   = EngineCommon(backend=backend, strategy="row_priority")
 data_gen = DataGenerator(backend, mx_K=2)
 
 # Build model
-model = Quadratic(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
-model._submodules['mps'].requires_grad_(True)
+graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
+model = BornMachine(graph, 2, backend=backend).auto_init(orthogonal=True)
+model._submodules['tn'].requires_grad_(True)
 combined = model.build()
 
 # Training

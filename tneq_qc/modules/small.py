@@ -8,7 +8,7 @@ constructor.  Core tensors are *not* initialized automatically; call
 Example::
 
     mps = MPS(nqubits=3, bond_dim=4).auto_init()
-    cs  = CircuitState(nqubits=3, phys_dim=2).auto_init()
+    state = State(nqubits=3, phys_dim=2).auto_init()
     mx  = MeasureMatrix(nqubits=3, phys_dim=2).auto_init()
 """
 
@@ -57,7 +57,7 @@ class State(QCTN):
     dimension ``phys_dim``.  This represents a product-state input to a
     quantum circuit.
 
-    Graph for ``CircuitState(nqubits=3, phys_dim=2)``::
+    Graph for ``State(nqubits=3, phys_dim=2)``::
 
         -A-2-
         -B-2-
@@ -105,9 +105,6 @@ class State(QCTN):
                 raw.reshape(batch_size, -1)[:, 0] = 1
             self.cores_weights[core_name] = TNTensor(raw, has_batch=batch_size is not None)
         return self
-
-
-CircuitState = State
 
 
 class MeasureMatrix(QCTN):

@@ -13,37 +13,21 @@ from .base import ContractionStrategy
 class StrategyCompiler:
     """Strategy compiler, responsible for selecting and compiling the optimal strategy"""
     
-    # Strategy list for three modes
-    MODES = {
-        'fast': ['einsum_default'],
-        'balanced': ['row_priority'],
-        'full': ['row_priority']
-    }
-    
     # Global strategy registry
     _strategies: Dict[str, ContractionStrategy] = {}
     
     def __init__(
         self,
         strategy: Union[str, List[str], None] = None,
-        mode: str = None,
     ):
         """
         Initialize compiler
         
         Args:
             strategy: Strategy name or ordered list of candidate strategy names.
-            mode: Deprecated compatibility option: 'fast', 'balanced', or 'full'.
         """
         if strategy is None:
-            if mode is None:
-                strategy = 'row_priority'
-            else:
-                if mode not in self.MODES:
-                    raise ValueError(
-                        f"Invalid mode '{mode}'. Must be one of {list(self.MODES.keys())}"
-                    )
-                strategy = self.MODES[mode]
+            strategy = 'row_priority'
 
         if isinstance(strategy, str):
             strategy_names = [strategy]
@@ -53,30 +37,18 @@ class StrategyCompiler:
         if not strategy_names:
             raise ValueError("strategy must contain at least one strategy name")
 
-        self.mode = mode
         self.strategy_names = strategy_names
         self.strategy_key = "+".join(strategy_names)
     
     @classmethod
-    def register_strategy(cls, strategy: ContractionStrategy, modes: List[str] = None):
+    def register_strategy(cls, strategy: ContractionStrategy):
         """
         Register a strategy (static method for registration in __init__.py)
         
         Args:
-            strategy: Strategy instance
-            modes: Which modes to register to, e.g. ['fast', 'balanced', 'full']
-                   If None, only register to the strategy registry without adding to any mode
+            strategy: Strategy instance.
         """
         cls._strategies[strategy.name] = strategy
-        
-        if modes is not None:
-            for mode in modes:
-                if mode not in cls.MODES:
-                    raise ValueError(
-                        f"Invalid mode '{mode}'. Must be one of {list(cls.MODES.keys())}"
-                    )
-                if strategy.name not in cls.MODES[mode]:
-                    cls.MODES[mode].append(strategy.name)
     
     @classmethod
     def get_registered_strategies(cls) -> Dict[str, ContractionStrategy]:
@@ -150,19 +122,12 @@ class StrategyCompiler:
         
         return best['compute_fn'], best['name'], best['cost']
     
-    def register_custom_strategy(self, strategy: ContractionStrategy, modes: List[str] = None):
+    def register_custom_strategy(self, strategy: ContractionStrategy):
         """
         Register custom strategy (instance method for runtime registration)
         
         Args:
-            strategy: Strategy instance
-            modes: Deprecated compatibility option. If None, the strategy is
-                only registered by name and can still be selected via
+            strategy: Strategy instance. It can be selected via
                 ``EngineCommon(strategy=strategy.name)``.
         """
-        self.register_strategy(strategy, modes)
-
-    @classmethod
-    def get_mode_strategies(cls) -> Dict[str, List[str]]:
-        """Return the configured strategy names for each mode."""
-        return {mode: names.copy() for mode, names in cls.MODES.items()}
+        self.register_strategy(strategy)

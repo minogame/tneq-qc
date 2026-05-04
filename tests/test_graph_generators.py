@@ -64,9 +64,9 @@ class TestGenerateExampleGraph:
         qctn = _parse(graph, backend)
         assert qctn.nqubits == N
 
-    def test_circuit(self, backend):
-        graph = QCTNHelper.generate_example_graph(n=N, graph_type="circuit", dim_char='2')
-        print(f"\n[circuit, n={N}]\n{graph}")
+    def test_state(self, backend):
+        graph = QCTNHelper.generate_example_graph(n=N, graph_type="state", dim_char='2')
+        print(f"\n[state, n={N}]\n{graph}")
         _check_rows(graph, N)
         qctn = _parse(graph, backend)
         assert qctn.nqubits == N
@@ -153,22 +153,22 @@ class TestMps:
 
 
 # ======================================================================
-# QCTNHelper.circuit_state  (named constructor)
+# QCTNHelper.state  (named constructor)
 # ======================================================================
 
-class TestCircuitState:
+class TestState:
 
-    def test_circuit_state(self, backend):
-        graph = QCTNHelper.circuit_state(nqubits=N, phys_dim=2)
-        print(f"\n[QCTNHelper.circuit_state, nqubits={N}]\n{graph}")
+    def test_state(self, backend):
+        graph = QCTNHelper.state(nqubits=N, phys_dim=2)
+        print(f"\n[QCTNHelper.state, nqubits={N}]\n{graph}")
         _check_rows(graph, N)
         qctn = _parse(graph, backend)
         assert qctn.nqubits == N
         assert qctn.ncores == N
 
-    def test_circuit_state_one_core_per_qubit(self, backend):
+    def test_state_one_core_per_qubit(self, backend):
         """Each qubit line should contain exactly one core symbol."""
-        graph = QCTNHelper.circuit_state(nqubits=N, phys_dim=2)
+        graph = QCTNHelper.state(nqubits=N, phys_dim=2)
         rows = [r for r in graph.strip().splitlines() if r.strip()]
         assert len(rows) == N
 

@@ -389,7 +389,7 @@ def _contract_group(
     remaining_out_edges = [edge for _, edge in collected_out_edges]
     
     if isinstance(result_tensor, TNTensor):
-        result_tensor.auto_scale()
+        result_tensor = backend.maybe_auto_scale(result_tensor)
 
     return {
         'core_idx': -1 - qubit_idx,
@@ -528,6 +528,8 @@ def _contract_remaining(core_tensor_list: List[Dict], backend):
 
     if has_tntensor:
         raw_result = backend.einsum(einsum_eq, *raw_tensors)
-        return TNTensor(raw_result, scale=total_scale, log_scale=total_log_scale)
+        return backend.maybe_auto_scale(
+            TNTensor(raw_result, scale=total_scale, log_scale=total_log_scale)
+        )
     else:
         return backend.einsum(einsum_eq, *tensors)

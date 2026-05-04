@@ -58,6 +58,7 @@ class EinsumStrategy(ContractionStrategy):
             has_tntensor = False
             _tensors = []
             total_scale = None
+            total_log_scale = None
             for t in tensors:
                 if isinstance(t, TNTensor):
                     _tensors.append(t.tensor)
@@ -66,6 +67,10 @@ class EinsumStrategy(ContractionStrategy):
                         total_scale = t.scale
                     else:
                         total_scale *= t.scale
+                    if total_log_scale is None:
+                        total_log_scale = t.log_scale
+                    else:
+                        total_log_scale += t.log_scale
                 else:
                     _tensors.append(t)
 
@@ -74,7 +79,8 @@ class EinsumStrategy(ContractionStrategy):
             result = backend.execute_expression(jit_fn, *_tensors)
 
             if has_tntensor and total_scale is not None:
-                result = TNTensor(result, scale=total_scale)
+                result = TNTensor(result, scale=total_scale, log_scale=total_log_scale)
+                result = backend.maybe_auto_scale(result)
 
             return result
 

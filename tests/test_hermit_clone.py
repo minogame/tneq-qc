@@ -17,7 +17,7 @@ def backend():
 class TestQCTNHermit:
 
     def test_mps_qctn_concat_hermit_contract_is_identity(self, backend):
-        engine = EngineCommon(backend=backend, strategy_mode="full")
+        engine = EngineCommon(backend=backend, strategy="row_priority")
         graph = QCTNHelper.mps(4, bond_dim=2, phys_dim=2)
         qctn = QCTN(graph, backend=backend).auto_init(orthogonal=True)
 

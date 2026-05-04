@@ -16,13 +16,12 @@ Application modules
 - :class:`~tneq_qc.modules.app.BornMachine`
 """
 
-from .small import MPS, State, CircuitState, MeasureMatrix
-from .app import PlainMPS, TransposeMPS, MPS_with_Ref, Encoding, TNEQ, BornMachine, Quadratic
+from .small import MPS, State, MeasureMatrix
+from .app import PlainMPS, TransposeMPS, MPS_with_Ref, Encoding, TNEQ, BornMachine
 
 __all__ = [
     "MPS",
     "State",
-    "CircuitState",
     "MeasureMatrix",
     "PlainMPS",
     "TransposeMPS",
@@ -30,5 +29,4 @@ __all__ = [
     "Encoding",
     "TNEQ",
     "BornMachine",
-    "Quadratic",
 ]

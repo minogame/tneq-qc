@@ -116,8 +116,8 @@ LR           = 0.01
 LOG_EVERY    = 1
 SAVE_DIR     = "checkpoints"
 
-def init_circuit_01(qctn: QCTN, backend) -> QCTN:
-    """Fill each circuit core with an alternating 0/1 pattern."""
+def init_state_basis(qctn: QCTN, backend) -> QCTN:
+    """Fill each state core with an alternating 0/1 pattern."""
     for core_info in qctn.adjacency_table:
         core_name = core_info['core_name']
         shape = tuple(core_info['input_shape'] + core_info['output_shape'])

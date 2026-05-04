@@ -190,11 +190,10 @@ class EngineDistributed(EngineCommon):
     def __init__(self,
                  backend=None,
                  strategy: Optional[str] = None,
-                 strategy_mode: Optional[str] = None,
                  comm: Optional[CommBase] = None,
                  partition_config: Optional[PartitionConfig] = None,
                  comm_timeout: float = 300.0):
-        super().__init__(backend=backend, strategy=strategy, strategy_mode=strategy_mode)
+        super().__init__(backend=backend, strategy=strategy)
 
         self.comm = comm or get_comm_backend(self.backend.backend_info.backend_type)
 
@@ -938,7 +937,9 @@ class EngineDistributed(EngineCommon):
 
         self.comm.barrier()
 
-        return TNTensor(result, scale=combined_scale, log_scale=combined_log_scale)
+        return self.backend.maybe_auto_scale(
+            TNTensor(result, scale=combined_scale, log_scale=combined_log_scale)
+        )
 
     @staticmethod
     def _cross_edge_key(edge: Dict[str, Any]) -> Tuple:

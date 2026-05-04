@@ -13,7 +13,7 @@ A. Small module initialization
 B. Application module initialization
 C. Small-module composition into application modules
 D. Transpose and reference semantics
-E. chunk / concat (renamed from split / merge)
+E. chunk / concat
 F. Contract basic shapes
 """
 
@@ -28,7 +28,6 @@ from tneq_qc.core.tn_tensor import TNTensor
 from tneq_qc.modules import (
     MPS,
     State,
-    CircuitState,
     MeasureMatrix,
     PlainMPS,
     TransposeMPS,
@@ -36,7 +35,6 @@ from tneq_qc.modules import (
     Encoding,
     TNEQ,
     BornMachine,
-    Quadratic,
 )
 from tneq_qc.contractor.einsum_strategy import EinsumStrategy
 from tneq_qc.utils.graph_generators import QCTNHelper
@@ -62,13 +60,13 @@ def mps3_init(mps3):
 
 
 @pytest.fixture
-def cs3(backend):
-    return CircuitState(nqubits=3, phys_dim=2, backend=backend)
+def state3(backend):
+    return State(nqubits=3, phys_dim=2, backend=backend)
 
 
 @pytest.fixture
-def cs3_init(cs3):
-    return cs3.auto_init(orthogonal=True)
+def state3_init(state3):
+    return state3.auto_init(orthogonal=True)
 
 
 @pytest.fixture
@@ -111,18 +109,18 @@ class TestSmallModuleInit:
     def test_mps_ncores_equals_nqubits(self, mps3):
         assert mps3.ncores == mps3.nqubits - 1
 
-    def test_circuit_state_cores_empty_before_init(self, cs3):
-        assert cs3.cores_weights == {}
+    def test_state_cores_empty_before_init(self, state3):
+        assert state3.cores_weights == {}
 
-    def test_circuit_state_auto_init_populates_cores(self, cs3_init):
-        assert len(cs3_init.cores_weights) == cs3_init.ncores == 3
-        for tensor in cs3_init.cores_weights.values():
+    def test_state_auto_init_populates_cores(self, state3_init):
+        assert len(state3_init.cores_weights) == state3_init.ncores == 3
+        for tensor in state3_init.cores_weights.values():
             raw = tensor.tensor if isinstance(tensor, TNTensor) else tensor
             assert torch.allclose(raw.reshape(-1)[0], torch.tensor(1, dtype=raw.dtype))
             assert torch.allclose(raw.reshape(-1)[1:], torch.zeros_like(raw.reshape(-1)[1:]))
 
-    def test_circuit_state_nqubits(self, cs3):
-        assert cs3.nqubits == 3
+    def test_state_nqubits(self, state3):
+        assert state3.nqubits == 3
 
     def test_measure_matrix_cores_empty_before_init(self, mx3):
         assert mx3.cores_weights == {}
@@ -214,9 +212,9 @@ class TestAppModuleInit:
         assert model._submodules["tn"].graph is not None
         assert model._submodules["tn"].nqubits == 3
 
-    def test_quadratic_requires_graph(self, backend):
+    def test_born_machine_requires_graph(self, backend):
         with pytest.raises(ValueError, match="non-None graph string"):
-            Quadratic(None, 2, backend=backend)
+            BornMachine(None, 2, backend=backend)
 
     def test_auto_init_chain_propagates(self, backend):
         """auto_init on parent should init all submodules."""
@@ -234,21 +232,21 @@ class TestAppModuleInit:
 class TestComposition:
 
     def test_manual_composition_matches_encoding(self, backend):
-        """Manually assembling circuit+mps should give same core count as Encoding."""
+        """Manually assembling state+mps should give same core count as Encoding."""
         nq, bd = 3, 4
         container = QCTN(graph=None, backend=backend)
-        container.register_module("circuit", CircuitState(nq, 2, backend))
+        container.register_module("state", State(nq, 2, backend))
         container.register_module("mps", MPS(nq, bd, 2, backend))
         container.auto_init(orthogonal=True)
 
         encoding = Encoding(nq, bd, backend=backend).auto_init(orthogonal=True)
         assert len(container.all_cores) == len(encoding.all_cores)
 
-    def test_manual_quadratic_composition(self, backend):
-        """Assembling circuit+mps+mx manually should give 8 cores for nqubits=3."""
+    def test_manual_born_machine_composition(self, backend):
+        """Assembling state+mps+mx manually should give 8 cores for nqubits=3."""
         nq = 3
         container = QCTN(graph=None, backend=backend)
-        container.register_module("circuit", CircuitState(nq, 2, backend))
+        container.register_module("state", State(nq, 2, backend))
         container.register_module("mps", MPS(nq, 4, 2, backend))
         container.register_module("mx", MeasureMatrix(nq, 2, backend))
         container.auto_init(orthogonal=True)
@@ -330,7 +328,7 @@ class TestTransposeAndRef:
 
 
 # ---------------------------------------------------------------------------
-# E. chunk / concat (renamed from split / merge)
+# E. chunk / concat
 # ---------------------------------------------------------------------------
 
 class TestChunkConcat:
@@ -371,24 +369,6 @@ class TestChunkConcat:
         print(f"\n[concat_with] merged:\n{merged}")
         assert merged.ncores == q1.ncores + q2.ncores
 
-    def test_split_raises_deprecation_warning(self, backend):
-        qctn = QCTN("-3-A-3-B-3-\n-3-A-3-B-3-", backend=backend).auto_init(orthogonal=True)
-        with pytest.warns(DeprecationWarning, match="chunk"):
-            qctn.split()
-
-    def test_merge_raises_deprecation_warning(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
-        with pytest.warns(DeprecationWarning, match="concat"):
-            QCTN.merge(q1, q2)
-
-    def test_merge_with_raises_deprecation_warning(self, backend):
-        q1 = QCTN("-2-A-2-\n-2-A-2-", backend=backend).auto_init(orthogonal=True)
-        q2 = QCTN("-2-B-2-\n-2-B-2-", backend=backend).auto_init(orthogonal=True)
-        with pytest.warns(DeprecationWarning, match="concat_with"):
-            q1.merge_with(q2)
-
-
 # ---------------------------------------------------------------------------
 # F. Contract basic shapes
 # ---------------------------------------------------------------------------
@@ -399,7 +379,7 @@ class TestContractBasic:
         """MPS contraction via EinsumStrategy should produce a result."""
         strategy = EinsumStrategy()
         shapes_info = {
-            "circuit_states_shapes": None,
+            "states_shapes": None,
             "measure_shapes": None,
             "measure_is_matrix": False,
         }
@@ -415,7 +395,7 @@ class TestContractBasic:
         """Contraction of a symmetric MPS (no input/measure) should give a scalar."""
         strategy = EinsumStrategy()
         shapes_info = {
-            "circuit_states_shapes": None,
+            "states_shapes": None,
             "measure_shapes": None,
             "measure_is_matrix": False,
         }
@@ -465,49 +445,49 @@ class TestComplexChunkConcat:
         print(f"[mps+mpsT] merged:\n{merged}")
         assert merged.ncores == mps.ncores + mpsT.ncores
 
-    # 3. CS + MPS + MX concat
-    def test_cs_mps_mx_concat(self, backend):
-        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+    # 3. State + MPS + MX concat
+    def test_state_mps_mx_concat(self, backend):
+        state  = State(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
-        merged = QCTN.concat(QCTN.concat(cs, mps), mx)
-        print(f"\n[cs+mps+mx] cs:\n{cs}")
-        print(f"[cs+mps+mx] mps:\n{mps}")
-        print(f"[cs+mps+mx] mx:\n{mx}")
-        print(f"[cs+mps+mx] merged:\n{merged}")
-        assert merged.ncores == cs.ncores + mps.ncores + mx.ncores
+        merged = QCTN.concat(QCTN.concat(state, mps), mx)
+        print(f"\n[state+mps+mx] state:\n{state}")
+        print(f"[state+mps+mx] mps:\n{mps}")
+        print(f"[state+mps+mx] mx:\n{mx}")
+        print(f"[state+mps+mx] merged:\n{merged}")
+        assert merged.ncores == state.ncores + mps.ncores + mx.ncores
 
-    # 4. CS + CS转置 concat
-    def test_cs_csT_concat(self, backend):
-        cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
-        csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
-        merged = QCTN.concat(cs, csT)
-        print(f"\n[cs+csT] cs:\n{cs}")
-        print(f"[cs+csT] csT:\n{csT}")
-        print(f"[cs+csT] merged:\n{merged}")
-        assert merged.ncores == cs.ncores + csT.ncores
+    # 4. State + State transpose concat
+    def test_state_stateT_concat(self, backend):
+        state  = State(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        stateT = State(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        merged = QCTN.concat(state, stateT)
+        print(f"\n[state+stateT] state:\n{state}")
+        print(f"[state+stateT] stateT:\n{stateT}")
+        print(f"[state+stateT] merged:\n{merged}")
+        assert merged.ncores == state.ncores + stateT.ncores
 
-    # 5. CS + MPS + MX + MX转置 + CS转置 concat
+    # 5. State + MPS + MX + MX transpose + State transpose concat
     def test_full_chain_concat(self, backend):
-        cs  = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        state  = State(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
         mps = MPS(nqubits=5, bond_dim=3, phys_dim=3, backend=backend).auto_init(orthogonal=True)
         mx  = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
         mxT = MeasureMatrix(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
-        csT = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        stateT = State(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
 
-        # cs  = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        # state  = State(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         # mps = MPS(nqubits=3, bond_dim=4, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         # mx  = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
         # mxT = MeasureMatrix(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
-        # csT = CircuitState(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
-        merged = cs.concat_with(mps).concat_with(mx).concat_with(mxT).concat_with(csT)
-        print(f"\n[full_chain] cs:\n{cs}")
+        # stateT = State(nqubits=3, phys_dim=2, backend=backend).auto_init(orthogonal=True)
+        merged = state.concat_with(mps).concat_with(mx).concat_with(mxT).concat_with(stateT)
+        print(f"\n[full_chain] state:\n{state}")
         print(f"[full_chain] mps:\n{mps}")
         print(f"[full_chain] mx:\n{mx}")
         print(f"[full_chain] mxT:\n{mxT}")
-        print(f"[full_chain] csT:\n{csT}")
+        print(f"[full_chain] stateT:\n{stateT}")
         print(f"[full_chain] merged:\n{merged}")
-        assert merged.ncores == cs.ncores + mps.ncores + mx.ncores + mxT.ncores + csT.ncores
+        assert merged.ncores == state.ncores + mps.ncores + mx.ncores + mxT.ncores + stateT.ncores
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +503,7 @@ class TestGraphGeneratorsInQCTNModules:
             ("mps", "2"),
             ("tree", "2"),
             ("wall", "2"),
-            ("circuit", "2"),
+            ("state", "2"),
             ("mx", "2"),
         ]
 
@@ -538,12 +518,12 @@ class TestGraphGeneratorsInQCTNModules:
 
             assert qctn.nqubits == n
 
-class TestQuadraticQCTNModules:
+class TestBornMachineQCTNModules:
     """Print all example graphs, then print QCTN built from each graph."""
 
     def test_print_all_graphs_and_qctn(self, backend):
 
-        cs = CircuitState(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
+        state = State(nqubits=5, phys_dim=3, backend=backend).auto_init(orthogonal=True)
         graph = "-2-A-2\n-2-A-2\n"
         tn = QCTN(graph, backend=backend)
         
@@ -552,7 +532,7 @@ class TestQuadraticQCTNModules:
             ("mps", "2"),
             ("tree", "2"),
             ("wall", "2"),
-            ("circuit", "2"),
+            ("state", "2"),
             ("mx", "2"),
         ]
 

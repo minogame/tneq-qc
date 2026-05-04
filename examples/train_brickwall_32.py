@@ -56,8 +56,8 @@ def make_correlated_gaussian_sampler(ndim):
     return sample_fn
 
 
-def init_circuit_01(qctn: QCTN, backend) -> QCTN:
-    """Fill each circuit core with an alternating 0/1 pattern."""
+def init_state_basis(qctn: QCTN, backend) -> QCTN:
+    """Fill each state core with an alternating 0/1 pattern."""
     for core_info in qctn.adjacency_table:
         core_name = core_info['core_name']
         shape = tuple(core_info['input_shape'] + core_info['output_shape'])
@@ -303,7 +303,7 @@ def main():
     ax.set_ylabel("q1")
 
     plt.tight_layout()
-    out_path = os.path.join(OUTPUT_DIR, "quadratic_heatmap_samples.png")
+    out_path = os.path.join(OUTPUT_DIR, "born_machine_heatmap_samples.png")
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
 

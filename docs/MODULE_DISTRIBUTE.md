@@ -82,7 +82,7 @@ from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
 
 engine = EngineDistributed(
     backend=backend,
-    strategy_mode='full',
+    strategy="row_priority",
     comm=comm,
     partition_config=PartitionConfig(
         strategy='layer',           # Partition strategy
@@ -133,7 +133,7 @@ PartitionConfig(
 
 | Parameter | Description |
 |---|---|
-| `strategy` | `'layer'`: Partition by segments of the quadratic structure (cs/tn/mx/tn_h/cs_t) |
+| `strategy` | `'layer'`: Partition by segments of the BornMachine structure (`state/tn/mx/tn_h/state_t`) |
 | `num_partitions` | Number of partitions, usually equal to `world_size` |
 
 ---
@@ -166,10 +166,10 @@ optimizer = DistributedSGDG(params, backend, comm, lr=0.01)
 ## 6. Complete Example
 
 ```python
-"""Distributed quadratic training"""
+"""Distributed BornMachine training"""
 import torch
 import torch.distributed as dist
-from tneq_qc import QCTN, BackendFactory, Quadratic, DataGenerator, make_data_fn, SGDG
+from tneq_qc import QCTN, BackendFactory, BornMachine, DataGenerator, make_data_fn, SGDG
 from tneq_qc.distributed import EngineDistributed
 from tneq_qc.distributed.engine.distributed_engine import PartitionConfig
 from tneq_qc.distributed.comm import get_comm_backend
@@ -183,7 +183,7 @@ world_size = dist.get_world_size()
 backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='float32')
 data_gen = DataGenerator(backend, mx_K=2)
 
-model = Quadratic(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
+model = BornMachine(nqubits=4, bond_dim=2, phys_dim=2, backend=backend).auto_init()
 model._submodules['mps'].requires_grad_(True)
 combined = model.build()
 
@@ -191,7 +191,7 @@ combined = model.build()
 comm = get_comm_backend(backend='torch', rank=rank, world_size=world_size)
 engine = EngineDistributed(
     backend=backend,
-    strategy_mode='full',
+    strategy="row_priority",
     comm=comm,
     partition_config=PartitionConfig(strategy='layer', num_partitions=world_size),
 )

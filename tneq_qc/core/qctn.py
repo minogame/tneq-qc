@@ -531,7 +531,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             phys_dim = phys_dims[0]
 
         from ..utils.graph_generators import QCTNHelper
-        bra_graph = QCTNHelper.circuit_bra(nqubits, phys_dim=phys_dim)
+        bra_graph = QCTNHelper.state_bra(nqubits, phys_dim=phys_dim)
         bra_qctn = QCTN(bra_graph, backend=self.backend)
 
         for c_name in self.cores:
@@ -715,8 +715,7 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
     def set_trace(self, qubit_indices='all'):
         """Mark qubits for trace (close boundary in/out edges).
 
-        Only effective with ``RowPriorityStrategy`` (``strategy_mode='full'``
-        or ``'balanced'``).
+        Only effective with ``RowPriorityStrategy``.
 
         Args:
             qubit_indices: ``'all'`` to trace every qubit, or a list of
@@ -847,15 +846,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 qctn2.core_names[core_name] = src_names[core_name]
 
         return qctn1, qctn2
-
-    def split(self, split_idx=None):
-        """.. deprecated:: Use :meth:`chunk` instead."""
-        warnings.warn(
-            "QCTN.split() is deprecated, use QCTN.chunk() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.chunk(split_idx)
 
     @staticmethod
     def concat(*args):
@@ -1102,16 +1092,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         new_qctn.tn_graph = TNGraph(new_graph, max_qubits)
 
         return new_qctn
-    @staticmethod
-    def merge(qctn1, qctn2):
-        """.. deprecated:: Use :meth:`concat` instead."""
-        warnings.warn(
-            "QCTN.merge() is deprecated, use QCTN.concat([qctn1, qctn2]) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return QCTN.concat([qctn1, qctn2])
-
     def concat_with(self, other):
         """Merge *self* with *other* and return a new QCTN.
 
@@ -1126,15 +1106,6 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             QCTN: A new merged QCTN.
         """
         return QCTN.concat([self, other])
-
-    def merge_with(self, other):
-        """.. deprecated:: Use :meth:`concat_with` instead."""
-        warnings.warn(
-            "QCTN.merge_with() is deprecated, use QCTN.concat_with() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.concat_with(other)
 
     # ================================================================
     # Phase 2: Reference semantics for siamese networks (R2-引用语义)
@@ -1307,5 +1278,3 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
                 hermit_qctn._submodules[name] = submodule
 
         return hermit_qctn
-
-
