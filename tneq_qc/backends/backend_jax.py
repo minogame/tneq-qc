@@ -291,6 +291,13 @@ class BackendJAX(ComputeBackend):
             return TNTensor(self.jnp.copy(tensor.tensor), scale=tensor.scale)
         return self.jnp.copy(tensor)
 
+    def detach(self, tensor):
+        """Detach tensor from the autodiff graph (JAX: stop_gradient)."""
+        from ..core.tn_tensor import TNTensor
+        if isinstance(tensor, TNTensor):
+            return TNTensor(self.jax.lax.stop_gradient(tensor.tensor), scale=tensor.scale)
+        return self.jax.lax.stop_gradient(tensor)
+
     def unsqueeze(self, tensor, dim):
         """Add a dimension of size 1 at the specified position."""
         from ..core.tn_tensor import TNTensor
@@ -308,9 +315,11 @@ class BackendJAX(ComputeBackend):
     def clamp(self, tensor, min=None, max=None):
         """Clamp tensor values to a range."""
         from ..core.tn_tensor import TNTensor
+        # jnp.clip uses positional (min, max); the a_min/a_max kwargs were
+        # removed in newer JAX.
         if isinstance(tensor, TNTensor):
-            return TNTensor(self.jnp.clip(tensor.tensor * tensor.scale, a_min=min, a_max=max))
-        return self.jnp.clip(tensor, a_min=min, a_max=max)
+            return TNTensor(self.jnp.clip(tensor.tensor * tensor.scale, min, max))
+        return self.jnp.clip(tensor, min, max)
 
     def diagonal(self, tensor, dim1=-2, dim2=-1):
         """Extract diagonal from a tensor."""

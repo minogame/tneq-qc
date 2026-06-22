@@ -30,7 +30,7 @@ from ..core.tn_tensor import TNTensor
 from ..core.qctn import TensorSide
 
 
-def assemble_global_einsum(qctn):
+def assemble_global_einsum(qctn, cores_override=None):
     """Build one global einsum from ``qctn.build_graph()``.
 
     Returns ``(eq, raw_tensors, total_scale, total_log_scale, output)`` where
@@ -40,6 +40,14 @@ def assemble_global_einsum(qctn):
     The wiring (symbols, trace closure, batch indices) is exactly what
     ``RowPriorityStrategy`` consumes, so the contraction is numerically
     identical to ``row_priority``.
+
+    Args:
+        cores_override: optional ``{core_name: tensor}`` mapping.  When given,
+            each entry's tensor is replaced by ``cores_override[core_name]`` if
+            present.  This routes the *traced* parameters from the gradient
+            ``loss_fn`` into the contraction so that backends with functional
+            autodiff (JAX's ``value_and_grad``) see the dependency.  For PyTorch
+            the overrides are the same leaf objects, so behaviour is unchanged.
     """
     entries, _ = qctn.build_graph()
 
@@ -51,6 +59,10 @@ def assemble_global_einsum(qctn):
 
     for e in entries:
         tensor = e["tensor"]
+        if cores_override is not None:
+            name = e.get("core_name")
+            if name in cores_override:
+                tensor = cores_override[name]
         batch_sym = e.get("batch_symbol", "") or ""
         for ch in batch_sym:
             batch_syms.add(ch)
@@ -115,9 +127,13 @@ class SlicedCotengraStrategy(EinsumStrategy):
 
     def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend, **_kwargs) -> Callable:
         def compute_fn(_cores_dict=None, _circuit_states=None, _measure_matrices=None, **_):
-            # Read live tensors (and scale) from the wired graph; ignore the
-            # passed cores_dict, exactly like RowPriorityStrategy.
-            eq, raw_tensors, total_scale, total_log_scale, _out = assemble_global_einsum(qctn)
+            # Wire from build_graph(); when a cores_dict is supplied (the
+            # gradient loss_fn passes traced params here) route those tensors in
+            # so functional-autodiff backends (JAX) see the dependency.  For
+            # PyTorch the overrides are the same leaf objects → unchanged.
+            eq, raw_tensors, total_scale, total_log_scale, _out = assemble_global_einsum(
+                qctn, cores_override=_cores_dict
+            )
 
             planner = getattr(qctn, "_cotengra_planner", None)
             if planner is None:
