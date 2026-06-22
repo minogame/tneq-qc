@@ -3,6 +3,26 @@ class Configuration:
     opt_einsum_optimize = 'greedy'
     contraction_engine = 'opt_einsum' # or 'QCTN'
 
+    # --- cotengra (sliced contraction) ---
+    # Path-search methods for cotengra's HyperOptimizer. 'greedy' needs no
+    # extra deps; add 'kahypar' only if the KaHyPar package is installed.
+    cotengra_methods = ('greedy',)
+    cotengra_max_repeats = 32
+    cotengra_minimize = 'flops'          # 'flops' | 'size' | 'combo' | 'write'
+    # Target number of slices the contraction is cut into. 1 == no slicing
+    # (single-node default). The sliced/distributed engine raises this to at
+    # least the world size so each rank gets an independent slice subset.
+    cotengra_target_slices = 1
+    # Optional cap on the largest intermediate tensor (entries). When set,
+    # cotengra slices contracted indices until the peak fits. None == disabled.
+    cotengra_target_size = None
+    # Fixed seed for the path/slice search. Distributed ranks MUST use the same
+    # seed so every rank builds the identical sliced tree (otherwise slice ids
+    # are incomparable and partial sums do not combine).
+    cotengra_seed = 0
+    # Default contraction strategy used by the distributed engines.
+    distributed_default_strategy = 'cotengra'
+
 class AgentBehavier:
     n_iter = 10
     estimation_iter = 100

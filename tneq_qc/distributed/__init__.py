@@ -32,7 +32,7 @@ from .comm import (
 )
 
 # Distributed engine
-from .engine import EngineDistributed, DistributedEngineSiamese
+from .engine import EngineDistributed, DistributedEngineSiamese, EngineSliced
 from .engine.distributed_engine import (
     PartitionConfig,
     ContractStage,
@@ -58,7 +58,7 @@ __all__ = [
     'get_comm_backend', 'get_auto_backend',
     'MPIBackend', 'MockMPIBackend',
     # Engine
-    'EngineDistributed', 'DistributedEngineSiamese',
+    'EngineDistributed', 'DistributedEngineSiamese', 'EngineSliced',
     'PartitionConfig', 'ContractStage', 'DistributedContractPlan',
     # Optimization
     'AllReduceGrad', 'allreduce_with_grad', 'DistributedSGDG', 'LRScheduler',

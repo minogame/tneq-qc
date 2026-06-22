@@ -14,6 +14,8 @@ from .base import ContractionStrategy
 from .einsum_strategy import EinsumStrategy
 from .mps_strategy import MPSChainStrategy
 from .row_priority_strategy import RowPriorityStrategy
+from .cotengra_strategy import SlicedCotengraStrategy
+from .cotengra_planner import CotengraPlanner, cotengra_available
 from .compiler import StrategyCompiler
 
 
@@ -27,6 +29,10 @@ def _register_builtin_strategies():
     StrategyCompiler.register_strategy(EinsumStrategy())
 
     StrategyCompiler.register_strategy(RowPriorityStrategy())
+
+    # 'cotengra' — sliced contraction. Registered unconditionally; its
+    # check_compatibility() returns False when cotengra is not installed.
+    StrategyCompiler.register_strategy(SlicedCotengraStrategy())
 
 
 def register_contraction_strategy(strategy: ContractionStrategy):
@@ -52,6 +58,9 @@ __all__ = [
     'EinsumStrategy',
     'MPSChainStrategy',
     'RowPriorityStrategy',
+    'SlicedCotengraStrategy',
+    'CotengraPlanner',
+    'cotengra_available',
     'StrategyCompiler',
     'register_contraction_strategy',
     'get_registered_contraction_strategies',
