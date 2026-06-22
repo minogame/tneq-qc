@@ -387,9 +387,11 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             c = self.cores_weights.get(c_name)
             if c is None:
                 continue
-            if not c.requires_grad:
+            # Backend-agnostic: raw JAX arrays have no requires_grad/is_leaf
+            # attributes (getattr defaults keep them out / treat as leaves).
+            if not getattr(c, 'requires_grad', False):
                 continue
-            if not c.is_leaf:
+            if not getattr(c, 'is_leaf', True):
                 continue
             result.append(c)
         return result
@@ -409,9 +411,9 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
             c = self.cores_weights.get(c_name)
             if c is None:
                 continue
-            if not c.requires_grad:
+            if not getattr(c, 'requires_grad', False):
                 continue
-            if not c.is_leaf:
+            if not getattr(c, 'is_leaf', True):
                 continue
             readable = names.get(c_name, c_name)
             result.append((readable, c))
@@ -426,8 +428,16 @@ class QCTN(QCTNGraphMixin, QCTNIOMixin, QCTNContractorMixin):
         Returns:
             self (for chaining).
         """
-        for t in self.cores_weights.values():
-            t.requires_grad_(requires_grad)
+        for name, t in list(self.cores_weights.items()):
+            if hasattr(t, "requires_grad_"):
+                # TNTensor, or a PyTorch tensor (native requires_grad_).
+                t.requires_grad_(requires_grad)
+            else:
+                # Raw backend array without the method (e.g. a JAX array): wrap
+                # it so the backend-agnostic trainability marker can be carried.
+                tt = TNTensor(t)
+                tt.requires_grad_(requires_grad)
+                self.cores_weights[name] = tt
         return self
 
     @staticmethod

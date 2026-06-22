@@ -30,6 +30,35 @@ from ..core.tn_tensor import TNTensor
 from ..core.qctn import TensorSide
 
 
+def _override_tensor(ov, cores_override, obj_to_symbol):
+    """Resolve an override tensor, re-deriving hermit views from the base.
+
+    A Hermitian-conjugate core (``tn_h = tn.hermit()``) is stored as a TNTensor
+    *view* whose ``source`` is the base core's TNTensor object and whose
+    ``_source_info`` records the transpose ``axes``.  Under PyTorch the view
+    shares the base leaf, so autograd connects them automatically.  Under
+    functional autodiff (JAX) the stored view is a disconnected constant, so the
+    hermit branch loses its gradient (the BornMachine ``0.5x`` symptom).
+
+    When an override is in effect we therefore re-derive the hermit core from the
+    *overridden* (traced) base — ``cores_override[base].hermit(axes)`` — so the
+    gradient flows through the conjugate branch on every backend.  For PyTorch
+    the base is the same leaf, so the value (and gradient) are unchanged.
+    """
+    if not isinstance(ov, TNTensor):
+        return ov
+    info = getattr(ov, "_source_info", None)
+    if not info or info.get("type") != "hermit" or ov.source is None:
+        return ov
+    base_sym = obj_to_symbol.get(id(ov.source))
+    if base_sym is None or base_sym not in cores_override:
+        return ov
+    base = cores_override[base_sym]
+    if not isinstance(base, TNTensor):
+        base = TNTensor(base)
+    return base.hermit(info["axes"])
+
+
 def assemble_global_einsum(qctn, cores_override=None):
     """Build one global einsum from ``qctn.build_graph()``.
 
@@ -51,6 +80,14 @@ def assemble_global_einsum(qctn, cores_override=None):
     """
     entries, _ = qctn.build_graph()
 
+    # Map original core-tensor object identity -> symbol, so a hermit view's
+    # ``.source`` (the base TNTensor object, preserved by concat) can be traced
+    # back to its base core for re-derivation under an override.
+    obj_to_symbol = (
+        {id(qctn.cores_weights[s]): s for s in qctn.cores}
+        if cores_override is not None else {}
+    )
+
     terms: List[str] = []
     raw_tensors: List[Any] = []
     batch_syms: set = set()
@@ -62,7 +99,9 @@ def assemble_global_einsum(qctn, cores_override=None):
         if cores_override is not None:
             name = e.get("core_name")
             if name in cores_override:
-                tensor = cores_override[name]
+                tensor = _override_tensor(
+                    cores_override[name], cores_override, obj_to_symbol
+                )
         batch_sym = e.get("batch_symbol", "") or ""
         for ch in batch_sym:
             batch_syms.add(ch)
