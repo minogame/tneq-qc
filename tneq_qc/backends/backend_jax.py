@@ -9,6 +9,50 @@ import numpy as np
 from .backend_interface import ComputeBackend, BackendInfo
 
 
+def _safe_jax_devices(jax, platform: str) -> list:
+    """Return the JAX devices for ``platform``, or ``[]`` if that backend is absent.
+
+    ``jax.devices(platform)`` raises ``RuntimeError`` when the requested platform's
+    backend is not available (e.g. asking for ``'gpu'`` on a TPU-only host), so we
+    treat any failure as "no such devices".
+    """
+    try:
+        return list(jax.devices(platform))
+    except (RuntimeError, ValueError):
+        return []
+
+
+def is_tpu_available(jax=None) -> bool:
+    """Whether a JAX TPU backend with at least one device is available."""
+    if jax is None:
+        import jax
+    return bool(_safe_jax_devices(jax, 'tpu'))
+
+
+def is_gpu_available(jax=None) -> bool:
+    """Whether a JAX GPU backend with at least one device is available."""
+    if jax is None:
+        import jax
+    return bool(_safe_jax_devices(jax, 'gpu'))
+
+
+def detect_device(jax=None) -> str:
+    """Pick the best available JAX device, preferring TPU > GPU > CPU.
+
+    Mirrors the torch-style "use the accelerator if there is one" convention
+    (cf. ``'cuda' if torch.cuda.is_available() else 'cpu'``), extended with TPU.
+
+    Returns one of ``'tpu'``, ``'gpu'`` or ``'cpu'``.
+    """
+    if jax is None:
+        import jax
+    if is_tpu_available(jax):
+        return 'tpu'
+    if is_gpu_available(jax):
+        return 'gpu'
+    return 'cpu'
+
+
 class BackendJAX(ComputeBackend):
     """JAX computational backend."""
 
@@ -19,8 +63,9 @@ class BackendJAX(ComputeBackend):
         Initialize backend JAX.
         
         Args:
-            device (Optional[str]): Device specification ('cpu', 'gpu', etc.).
-                If None, automatically detects available devices.
+            device (Optional[str]): Device specification ('tpu', 'gpu', 'cpu').
+                If None, automatically detects the best available device,
+                preferring TPU > GPU > CPU (see :func:`detect_device`).
             dtype (Optional[Any]): Default dtype for tensors. Can be a jnp.dtype
                 or a string like 'float32', 'float64', 'complex64', 'complex128', 'complex'.
             tensor_type (Optional[str]): High-level tensor wrapper type.
@@ -40,9 +85,9 @@ class BackendJAX(ComputeBackend):
             self.jax = jax
             self.jnp = jnp
 
-            # Auto-detect device if not specified
+            # Auto-detect device if not specified (TPU > GPU > CPU).
             if device is None:
-                device = 'gpu' if jax.devices('gpu') else 'cpu'
+                device = detect_device(jax)
 
             # Resolve and store default dtype
             self.default_dtype = self._resolve_default_dtype(dtype)
@@ -127,12 +172,7 @@ class BackendJAX(ComputeBackend):
         if not isinstance(array, self.jnp.ndarray):
             array = self.jnp.array(array, dtype=self.default_dtype)
 
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                array = self.jax.device_put(array, devices[0])
-
-        return TNTensor(array)
+        return TNTensor(self._device_put(array))
 
     def get_backend_name(self) -> str:
         return "jax"
@@ -225,15 +265,15 @@ class BackendJAX(ComputeBackend):
             )
 
         if not orthogonal:
-            return TNTensor(_sample(shape).astype(self.default_dtype))
+            return TNTensor(self._device_put(_sample(shape).astype(self.default_dtype)))
 
         flat_dim = int(np.prod(shape[:len(shape)//2]))
-        random_matrix = _sample((flat_dim, flat_dim)).astype(self.default_dtype)
+        random_matrix = self._device_put(_sample((flat_dim, flat_dim)).astype(self.default_dtype))
         Q, R = self.jnp.linalg.qr(random_matrix)
         d = self.jnp.diag(R)
         sign_correction = self.jnp.sign(d)
         Q = Q * sign_correction[None, :]
-        return TNTensor(Q.reshape(shape))
+        return TNTensor(self._device_put(Q.reshape(shape)))
 
     def _get_raw_tensor_type(self):
         return self.jnp.ndarray
@@ -255,34 +295,48 @@ class BackendJAX(ComputeBackend):
             return tensor.reshape(shape)
         return self.jnp.reshape(tensor, shape)
 
-    def _gpu_put(self, tensor):
-        """Move tensor to GPU if configured."""
-        if self.backend_info.device and 'gpu' in self.backend_info.device.lower():
-            devices = self.jax.devices('gpu')
-            if devices:
-                return self.jax.device_put(tensor, devices[0])
+    def _device_put(self, tensor):
+        """Place ``tensor`` on the configured device.
+
+        Honors the requested platform: ``'tpu'``/``'gpu'`` move the array onto the
+        first such accelerator, and ``'cpu'`` pins it to the host CPU even when an
+        accelerator is JAX's default backend (so ``device='cpu'`` means CPU, as in
+        torch). If the requested device's backend is unavailable, we leave the
+        array on JAX's default device rather than raising.
+        """
+        dev = (self.backend_info.device or '').lower()
+        for platform in ('tpu', 'gpu', 'cpu'):
+            if platform in dev:
+                devices = _safe_jax_devices(self.jax, platform)
+                if devices:
+                    return self.jax.device_put(tensor, devices[0])
+                break
         return tensor
+
+    # Backward-compatible alias for the old GPU-only helper name.
+    def _gpu_put(self, tensor):
+        return self._device_put(tensor)
 
     def eye(self, n: int, dtype=None):
         """Create an identity matrix of size n x n."""
         from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return TNTensor(self._gpu_put(self.jnp.eye(n, dtype=dtype)))
+        return TNTensor(self._device_put(self.jnp.eye(n, dtype=dtype)))
 
     def zeros(self, shape, dtype=None):
         """Create a tensor filled with zeros."""
         from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return TNTensor(self._gpu_put(self.jnp.zeros(shape, dtype=dtype)))
+        return TNTensor(self._device_put(self.jnp.zeros(shape, dtype=dtype)))
 
     def ones(self, shape, dtype=None):
         """Create a tensor filled with ones."""
         from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.default_dtype
-        return TNTensor(self._gpu_put(self.jnp.ones(shape, dtype=dtype)))
+        return TNTensor(self._device_put(self.jnp.ones(shape, dtype=dtype)))
 
     def clone(self, tensor):
         """Create a copy of the tensor."""
@@ -379,7 +433,7 @@ class BackendJAX(ComputeBackend):
         from ..core.tn_tensor import TNTensor
         if dtype is None:
             dtype = self.jnp.int32
-        return TNTensor(self._gpu_put(self.jnp.arange(*args, dtype=dtype)))
+        return TNTensor(self._device_put(self.jnp.arange(*args, dtype=dtype)))
 
     def stack(self, tensors, dim=0):
         """Stack tensors along a new dimension."""

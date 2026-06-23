@@ -85,7 +85,8 @@ class BackendFactory:
             ComputeBackend: Default backend instance (creates JAX backend if not set).
         """
         if cls._backend_instance is None:
-            cls.set_default_backend('jax', 'gpu')
+            # device=None lets the JAX backend auto-detect TPU > GPU > CPU.
+            cls.set_default_backend('jax', None)
         return cls._backend_instance
 
     @classmethod
