@@ -175,3 +175,5 @@ cython_debug/
 
 # Local history
 .history/
+
+.DS_Store

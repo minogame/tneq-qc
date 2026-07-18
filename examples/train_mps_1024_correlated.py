@@ -89,7 +89,12 @@ def init_measure_identity(qctn: QCTN, backend) -> QCTN:
 
 
 def main():
-    backend = BackendFactory.create_backend('pytorch', device='cpu', dtype='complex64')
+    backend = BackendFactory.create_backend(
+        'pytorch',
+        device='cpu',
+        dtype='complex64',
+        enable_auto_scale=True,
+    )
     engine  = EngineCommon(backend=backend, strategy='row_priority')
     data_gen = DataGenerator(backend, mx_K=PHYS_DIM)
 
@@ -172,8 +177,8 @@ def main():
 
     r_orig = engine.contract(combined)
     r_load = engine.contract(combined_val)
-    r_orig_np = backend.tensor_to_numpy(r_orig)
-    r_load_np = backend.tensor_to_numpy(r_load)
+    r_orig_np = r_orig.numpy() if hasattr(r_orig, "numpy") else backend.tensor_to_numpy(r_orig)
+    r_load_np = r_load.numpy() if hasattr(r_load, "numpy") else backend.tensor_to_numpy(r_load)
     reload_err = np.max(np.abs(r_orig_np - r_load_np))
     print(f"  Max reload error: {reload_err:.2e}")
 

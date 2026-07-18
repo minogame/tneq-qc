@@ -10,7 +10,7 @@ One batched student model (model2) learns B MNIST images simultaneously.
 After training: saves model, outputs comparison image grid and loss curve.
 
 Usage:
-    python examples/train_mnist.py
+    python -m examples.train_mnist
 """
 
 import sys

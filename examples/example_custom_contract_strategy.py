@@ -34,20 +34,22 @@ class MockContractStrategy(ContractionStrategy):
 
 def main():
     backend = BackendFactory.create_backend("pytorch", device="cpu", dtype="float32")
-    register_contraction_strategy(MockContractStrategy(), modes=["full"])
+    register_contraction_strategy(MockContractStrategy())
 
     graph = QCTNHelper.generate_example_graph(n=2, graph_type="mps", dim_char="2")
     qctn = QCTN(graph, backend=backend)
     qctn.auto_init(distribution="gaussian")
 
-    engine = EngineCommon(backend=backend, strategy_mode="full")
+    engine = EngineCommon(backend=backend, strategy="mock_contract")
     result = engine.contract(qctn)
 
-    cache = getattr(qctn, "_compiled_strategy_full")
+    cache = getattr(qctn, "_compiled_strategy_mock_contract")
     strategy_name = cache["strategy_name"]
 
     print(f"Selected strategy: {strategy_name}")
     print(f"Result shape: {tuple(result.shape)}")
+    print("Result:")
+    print(result.detach().cpu().numpy() if hasattr(result, "detach") else result)
 
 
 if __name__ == "__main__":
