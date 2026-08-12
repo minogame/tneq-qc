@@ -92,17 +92,24 @@ class State(QCTN):
         if self.backend is None:
             raise ValueError("Backend is required for auto_init")
 
+        import numpy as np
+
         for core_info in self.adjacency_table:
             core_name = core_info["core_name"]
             shape = tuple(core_info["input_shape"] + core_info["output_shape"])
             batch_size = getattr(self, "_core_batch_size", None)
             tensor_shape = (batch_size,) + shape if batch_size is not None else shape
-            tensor = self.backend.zeros(tensor_shape, dtype=dtype)
-            raw = tensor.tensor if isinstance(tensor, TNTensor) else tensor
+            # Build the basis state |0...0> with numpy (backend-agnostic) and
+            # convert — avoids in-place item assignment, which JAX arrays forbid.
+            # convert_to_tensor casts to the backend's default dtype.
+            arr = np.zeros(tensor_shape, dtype=np.float32)
             if batch_size is None:
-                raw.reshape(-1)[0] = 1
+                arr.reshape(-1)[0] = 1
             else:
-                raw.reshape(batch_size, -1)[:, 0] = 1
+                arr.reshape(batch_size, -1)[:, 0] = 1
+            raw = self.backend.convert_to_tensor(arr)
+            if isinstance(raw, TNTensor):
+                raw = raw.tensor
             self.cores_weights[core_name] = TNTensor(raw, has_batch=batch_size is not None)
         return self
 

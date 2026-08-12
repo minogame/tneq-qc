@@ -6,6 +6,7 @@ from .distributed_engine import (
     ContractStage,
     DistributedContractPlan,
 )
+from .sliced_engine import EngineSliced
 
 # Backward compatibility alias
 DistributedEngineSiamese = EngineDistributed
@@ -13,6 +14,7 @@ DistributedEngineSiamese = EngineDistributed
 __all__ = [
     'EngineDistributed',
     'DistributedEngineSiamese',
+    'EngineSliced',
     'PartitionConfig',
     'ContractStage',
     'DistributedContractPlan',

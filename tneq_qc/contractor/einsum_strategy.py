@@ -21,67 +21,42 @@ class EinsumStrategy(ContractionStrategy):
         """einsum can handle any structure"""
         return True
     
-    def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend) -> Callable:
+    def get_compute_function(self, qctn, shapes_info: Dict[str, Any], backend, **_kwargs) -> Callable:
+        """Return an opt_einsum compute function over the wired graph.
+
+        Wires from ``qctn.build_graph()`` (via ``assemble_global_einsum``) — the
+        same correct wiring ``RowPriorityStrategy`` and the cotengra strategy
+        use — rather than ``qctn.get_einsum_info()``, which mis-wires the generic
+        concat/trace case (it returned ``K^N`` independent of the weights).  Like
+        those strategies it ignores the ``cores_dict`` ordering args and reads
+        live tensors from the graph, but routes a supplied ``cores_dict``
+        override through so functional-autodiff backends (JAX) get gradients.
         """
-        Return computation function using opt_einsum.
+        import opt_einsum
+        from .cotengra_strategy import assemble_global_einsum  # lazy: avoid cycle
+        from ..config import Configuration
 
-        Delegates graph parsing to ``qctn.get_einsum_info()`` (R5) and
-        tensor assembly to ``qctn.build_core_list()`` (R5).
-        """
-        circuit_states_shapes = shapes_info.get('circuit_states_shapes')
-        measure_shapes = shapes_info.get('measure_shapes')
-        measure_is_matrix = shapes_info.get('measure_is_matrix', True)
+        def compute_fn(_cores_dict=None, _circuit_states=None, _measure_matrices=None, **_):
+            eq, raw_tensors, total_scale, total_log_scale, _out = assemble_global_einsum(
+                qctn, cores_override=_cores_dict
+            )
 
-        # R5: graph parsing now lives in QCTN
-        einsum_eq, tensor_shapes = qctn.get_einsum_info(
-            circuit_states_shapes, measure_shapes, measure_is_matrix
-        )
+            cache = getattr(qctn, "_einsum_default_expr", None)
+            if cache is None or cache[0] != eq:
+                expr = opt_einsum.contract_expression(
+                    eq,
+                    *[tuple(int(d) for d in t.shape) for t in raw_tensors],
+                    optimize=Configuration.opt_einsum_optimize,
+                )
+                qctn._einsum_default_expr = (eq, expr)
+            else:
+                expr = cache[1]
 
-        # Create optimized expression
-        expr = self.create_contract_expression(einsum_eq, tensor_shapes, optimize='auto')
+            result = backend.execute_expression(expr, *raw_tensors)
 
-        def compute_fn(cores_dict, circuit_states, measure_matrices):
-            """
-            Compute using einsum expression.
-
-            Args:
-                cores_dict: {core_name: core_tensor} dictionary
-                circuit_states: List of circuit input states
-                measure_matrices: List of measurement matrices
-
-            Returns:
-                Contraction result
-            """
-            # R5: tensor ordering now delegated to QCTN.build_core_list()
-            tensors = qctn.build_core_list(cores_dict, circuit_states, measure_matrices)
-
-            has_tntensor = False
-            _tensors = []
-            total_scale = None
-            total_log_scale = None
-            for t in tensors:
-                if isinstance(t, TNTensor):
-                    _tensors.append(t.tensor)
-                    has_tntensor = True
-                    if total_scale is None:
-                        total_scale = t.scale
-                    else:
-                        total_scale *= t.scale
-                    if total_log_scale is None:
-                        total_log_scale = t.log_scale
-                    else:
-                        total_log_scale += t.log_scale
-                else:
-                    _tensors.append(t)
-
-            # Execute expression
-            jit_fn = backend.jit_compile(expr)
-            result = backend.execute_expression(jit_fn, *_tensors)
-
-            if has_tntensor and total_scale is not None:
+            if total_scale is not None:
                 result = TNTensor(result, scale=total_scale, log_scale=total_log_scale)
                 result = backend.maybe_auto_scale(result)
-
             return result
 
         return compute_fn

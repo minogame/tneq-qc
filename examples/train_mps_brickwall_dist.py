@@ -6,6 +6,7 @@ multi-process training via torchrun.
 Usage:
     # Single process (fallback)
     python examples/train_mps_brickwall_dist.py
+    python -m examples.train_mps_brickwall_dist
 
     # 2 processes
     torchrun --nproc_per_node=2 examples/train_mps_brickwall_dist.py

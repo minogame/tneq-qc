@@ -185,16 +185,22 @@ class EngineCommon:
         # Non-leaf derived tensors (e.g. conj/permute views from hermit())
         # are intentionally skipped: autograd propagates their gradients back
         # to the originating leaf tensors automatically.
+        # Backend-agnostic trainability test. PyTorch reports requires_grad /
+        # is_leaf natively; JAX (functional autodiff) has neither, so TNTensor
+        # falls back to a marker set by requires_grad_() and treats arrays as
+        # leaves. Using the TNTensor-level view keeps both backends correct.
+        def _is_trainable_leaf(c) -> bool:
+            if isinstance(c, TNTensor):
+                return c.requires_grad and c.is_leaf
+            return getattr(c, 'requires_grad', False) and getattr(c, 'is_leaf', True)
+
         raw_core_tensors: List[Any] = []
         core_scales: List[Any] = []
         for c_name in qctn.cores:
             c = qctn.cores_weights[c_name]
-            raw = c.tensor if isinstance(c, TNTensor) else c
-            if not raw.requires_grad:
+            if not _is_trainable_leaf(c):
                 continue
-            if hasattr(raw, 'is_leaf') and not raw.is_leaf:
-                continue
-            raw_core_tensors.append(raw)
+            raw_core_tensors.append(c.tensor if isinstance(c, TNTensor) else c)
             core_scales.append(c.scale if isinstance(c, TNTensor) else 1.0)
 
         # Keep a reference to self for use inside the closure.
@@ -209,12 +215,7 @@ class EngineCommon:
             cores_dict: Dict[str, Any] = {}
             for c_name in qctn.cores:
                 c = qctn.cores_weights[c_name]
-                raw = c.tensor if isinstance(c, TNTensor) else c
-                is_trainable_leaf = (
-                    raw.requires_grad
-                    and not (hasattr(raw, 'is_leaf') and not raw.is_leaf)
-                )
-                if is_trainable_leaf:
+                if _is_trainable_leaf(c):
                     cores_dict[c_name] = TNTensor(
                         core_tensors_args[offset], core_scales[offset]
                     )

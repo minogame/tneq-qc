@@ -5,6 +5,7 @@ Loss: MSE(Tr(combined), 1.0)
 
 Usage:
     python examples/train_tneq.py
+    python -m examples.train_tneq
 """
 
 import sys
@@ -44,6 +45,7 @@ def main():
 
     # Teacher (fixed)
     graph = "\n".join(f"-{PHYS_DIM}-{chr(ord('A') + i)}-{PHYS_DIM}-" for i in range(N_QUBITS))
+    print(f"Graph:\n{graph}")
     teacher = QCTN(graph, backend=backend).auto_init(orthogonal=True)
 
     # Student (trainable, same structure)

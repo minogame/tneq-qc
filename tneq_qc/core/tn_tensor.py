@@ -489,7 +489,13 @@ class TNTensor:
 
     @property
     def requires_grad(self) -> bool:
-        return getattr(self._tensor, "requires_grad", False)
+        # Backend-agnostic: PyTorch tensors expose ``requires_grad`` natively;
+        # for backends without it (e.g. JAX, whose autodiff is functional) we
+        # fall back to a Python-level marker set by ``requires_grad_``.
+        native = getattr(self._tensor, "requires_grad", None)
+        if native is not None:
+            return bool(native)
+        return getattr(self, "_requires_grad_flag", False)
 
     def requires_grad_(self, requires_grad: bool = True) -> "TNTensor":
         if self.is_fixed and requires_grad:
@@ -497,9 +503,13 @@ class TNTensor:
                 f"Ignoring requires_grad_(True) on fixed TNTensor ({self.fixed_kind}).",
                 stacklevel=2,
             )
+            self._requires_grad_flag = False
             if hasattr(self._tensor, "requires_grad_"):
                 self._tensor.requires_grad_(False)
             return self
+        # Always record the marker (used by backends without native
+        # requires_grad); also set the native flag when supported (PyTorch).
+        self._requires_grad_flag = bool(requires_grad)
         if hasattr(self._tensor, "requires_grad_"):
             self._tensor.requires_grad_(requires_grad)
         return self

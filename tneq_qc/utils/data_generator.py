@@ -175,7 +175,12 @@ class DataGenerator:
             if hasattr(_raw_x, 'is_complex') and _raw_x.is_complex():
                 is_complex_backend = True
 
-        if is_complex_backend:
+        # The "_generate_real" path uses raw PyTorch tensor methods
+        # (unsqueeze/permute/exp/conj). For complex backends, or any non-PyTorch
+        # backend (e.g. JAX), use the NumPy-domain path, which is
+        # backend-agnostic and converts at the boundary.
+        is_torch = getattr(self.backend, "get_backend_name", lambda: "")() == "pytorch"
+        if is_complex_backend or not is_torch:
             return self._generate_complex(x, K, num_qubits, ret_type)
         return self._generate_real(x, K, num_qubits, ret_type)
 
