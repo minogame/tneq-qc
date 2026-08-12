@@ -1,4 +1,4 @@
-"""Born machine training example.
+"""Born machine training & sampling example.
 
 Structure: state + tn + mx + tn_h + state_bra
 Loss: NLL -mean(log(P) + log_scale) on batch expectation value.
@@ -7,7 +7,7 @@ After training: saves model, generates heatmap + scatter plot,
 computes KL divergence between training distribution and sampled data.
 
 Usage:
-    python examples/train_quadratic.py
+    python -m examples.train_sample_quadratic
 """
 
 import sys

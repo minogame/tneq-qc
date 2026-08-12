@@ -10,6 +10,7 @@ Run:
 
 Single-process (falls back to all slices on one rank):
     python examples/train_sliced_dist.py
+    python -m examples.train_sliced_dist
 """
 
 import sys

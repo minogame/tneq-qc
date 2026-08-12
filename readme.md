@@ -337,6 +337,7 @@ Core dependencies:
 - numpy
 - safetensors
 - tqdm
+- cotengra
 
 Optional:
 

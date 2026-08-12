@@ -1,5 +1,8 @@
 """
 Example script demonstrating QCTN chunk / concat operations and simple visualization.
+
+Usage:
+    python -m examples.example_qctn_merge_split
 """
 
 import numpy as np
