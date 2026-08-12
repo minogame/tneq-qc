@@ -726,7 +726,13 @@ class TNTensor:
         import numpy as np
         raw = self._tensor
         if hasattr(raw, "detach"):
-            raw = raw.detach().cpu().numpy()
+            raw = raw.detach()
+            # Lazy conjugate views (e.g. from hermit()/conj_transpose()) set
+            # PyTorch's conjugate bit; NumPy conversion requires resolving it
+            # into a materialized tensor first.
+            if hasattr(raw, "is_conj") and raw.is_conj():
+                raw = raw.resolve_conj()
+            raw = raw.cpu().numpy()
         elif not isinstance(raw, np.ndarray):
             raw = np.asarray(raw)
         return raw * self.scale
